@@ -1,26 +1,25 @@
 #!/usr/bin/env bash
-# One-click entry: run every dataset script in scripts/ sequentially.
-# Any extra args are passed through to each script (and then to run.py),
-# so you can switch model / override hyper-parameters, e.g.:
-#   bash run_main.sh --model iTransformer
-#   bash run_main.sh --model PatchTST --train_epochs 5
-#   MODEL=iTransformer bash run_main.sh
+# One-click entry for the current LARA MVP experiment.
+# Default: Weather-96 with LARA_DLinear. Any extra args are passed through
+# to scripts/Weather.sh and then to run.py, e.g.:
+#   bash run_main.sh --des offset_align
+#   MODEL=DLinear bash run_main.sh --des dlinear_baseline
 set -e
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# the seven common datasets
-sh "$DIR"/scripts/ETTh1.sh "$@"
-sh "$DIR"/scripts/ETTh2.sh "$@"
-sh "$DIR"/scripts/ETTm1.sh "$@"
-sh "$DIR"/scripts/ETTm2.sh "$@"
-sh "$DIR"/scripts/Electricity.sh "$@"
-sh "$DIR"/scripts/Traffic.sh "$@"
-sh "$DIR"/scripts/Weather.sh "$@"
+# Selected small multivariate dataset for fast LARA validation.
+bash "$DIR"/scripts/Weather.sh "$@"
 
-# extras
-sh "$DIR"/scripts/Solar.sh "$@"
-sh "$DIR"/scripts/PEMS03.sh "$@"
-sh "$DIR"/scripts/PEMS04.sh "$@"
-sh "$DIR"/scripts/PEMS07.sh "$@"
-sh "$DIR"/scripts/PEMS08.sh "$@"
+# Other datasets are intentionally disabled for the MVP sweep.
+# bash "$DIR"/scripts/ETTh1.sh "$@"
+# bash "$DIR"/scripts/ETTh2.sh "$@"
+# bash "$DIR"/scripts/ETTm1.sh "$@"
+# bash "$DIR"/scripts/ETTm2.sh "$@"
+# bash "$DIR"/scripts/Electricity.sh "$@"
+# bash "$DIR"/scripts/Traffic.sh "$@"
+# bash "$DIR"/scripts/Solar.sh "$@"
+# bash "$DIR"/scripts/PEMS03.sh "$@"
+# bash "$DIR"/scripts/PEMS04.sh "$@"
+# bash "$DIR"/scripts/PEMS07.sh "$@"
+# bash "$DIR"/scripts/PEMS08.sh "$@"
