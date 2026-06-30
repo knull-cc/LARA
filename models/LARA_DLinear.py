@@ -2,6 +2,7 @@ import os
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from LARA.memory import TimeSeriesMemory
 from LARA.modules import (
@@ -53,6 +54,7 @@ class Model(nn.Module):
         self.rank_temperature = float(getattr(configs, "lara_rank_temperature", 0.1))
         self.lambda_rank = float(getattr(configs, "lara_lambda_rank", 0.3))
         self.lambda_sparse = float(getattr(configs, "lara_lambda_sparse", 0.01))
+        self.lambda_gate = float(getattr(configs, "lara_lambda_gate", 0.0))
         self.sparse_mode = getattr(configs, "lara_sparse_mode", "softmax")
         self.offset_align = bool(getattr(configs, "lara_offset_align", True))
 
@@ -66,6 +68,8 @@ class Model(nn.Module):
         self.warned_no_memory = False
         self.aux_loss = None
         self.last_diagnostics = {}
+        self.diagnostic_sums = {}
+        self.diagnostic_count = 0
 
     def _load_host_checkpoint(self, checkpoint_path):
         if not checkpoint_path:
@@ -135,11 +139,26 @@ class Model(nn.Module):
             key: float(value.detach().cpu()) if torch.is_tensor(value) else float(value)
             for key, value in diagnostics.items()
         }
+        for key, value in self.last_diagnostics.items():
+            self.diagnostic_sums[key] = self.diagnostic_sums.get(key, 0.0) + value
+        self.diagnostic_count += 1
 
     def get_lara_diagnostics(self, reset=False):
         diagnostics = dict(self.last_diagnostics)
         if reset:
             self.last_diagnostics = {}
+        return diagnostics
+
+    def get_lara_diagnostic_average(self, reset=False):
+        if self.diagnostic_count == 0:
+            return {}
+        diagnostics = {
+            key: value / self.diagnostic_count
+            for key, value in self.diagnostic_sums.items()
+        }
+        if reset:
+            self.diagnostic_sums = {}
+            self.diagnostic_count = 0
         return diagnostics
 
     def forward(
@@ -190,23 +209,52 @@ class Model(nn.Module):
             "offset_align": y_host.new_tensor(1.0 if self.offset_align else 0.0),
         }
 
+        if y_true is not None:
+            utility, alpha_star = self.labeler(y_host, y_true, cand_futures)
+            oracle_mse_per_query = (
+                (y_host.detach().unsqueeze(1) * (1.0 - alpha_star[:, :, None, None])
+                 + cand_futures.detach() * alpha_star[:, :, None, None]
+                 - y_true.detach().unsqueeze(1))
+                .pow(2)
+                .mean(dim=(2, 3))
+                .min(dim=1)
+                .values
+            )
+            host_mse_per_query = (y_host.detach() - y_true.detach()).pow(2).mean(dim=(1, 2))
+            final_mse_per_query = (y_final.detach() - y_true.detach()).pow(2).mean(dim=(1, 2))
+            best_idx = scores.detach().argmax(dim=1)
+            supervised_alpha = alpha_star.gather(1, best_idx[:, None]).squeeze(1)
+            gate_target = supervised_alpha[:, None, None].expand_as(gate)
+            gate_loss = F.mse_loss(gate, gate_target)
+
+            diagnostics.update(
+                {
+                    "host_mse": host_mse_per_query.mean(),
+                    "final_mse": final_mse_per_query.mean(),
+                    "oracle_mse": oracle_mse_per_query.mean(),
+                    "oracle_gain": ((host_mse_per_query - oracle_mse_per_query)
+                                    / host_mse_per_query.clamp_min(1e-8)).mean(),
+                    "positive_utility": (utility > 1e-8).float().mean(),
+                    "helpful_query": (utility.max(dim=1).values > 1e-8).float().mean(),
+                    "alpha_star": alpha_star.mean(),
+                    "gate_loss": gate_loss,
+                }
+            )
+
         if self.training and y_true is not None:
-            utility, _ = self.labeler(y_host, y_true, cand_futures)
             rank_loss = listwise_kl_loss(scores, utility, temperature=self.rank_temperature)
             sparse_loss = normalized_entropy(weights)
-            self.aux_loss = self.lambda_rank * rank_loss + self.lambda_sparse * sparse_loss
-
-            host_mse = (y_host.detach() - y_true.detach()).pow(2).mean()
-            final_mse = (y_final.detach() - y_true.detach()).pow(2).mean()
+            self.aux_loss = (
+                self.lambda_rank * rank_loss
+                + self.lambda_sparse * sparse_loss
+                + self.lambda_gate * gate_loss
+            )
             diagnostics.update(
                 {
                     "rank_loss": rank_loss,
                     "sparse_loss": sparse_loss,
                     "rank_corr": rank_correlation(utility, scores.detach()),
-                    "positive_utility": (utility > 1e-8).float().mean(),
-                    "helpful_query": (utility.max(dim=1).values > 1e-8).float().mean(),
-                    "host_mse": host_mse,
-                    "final_mse": final_mse,
+                    "lambda_gate": y_host.new_tensor(self.lambda_gate),
                 }
             )
 

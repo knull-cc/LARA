@@ -87,6 +87,15 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             return
         parts = [f'{key}: {value:.4f}' for key, value in diagnostics.items()]
         print('\tLARA | ' + ' | '.join(parts))
+
+    def _print_lara_average_diagnostics(self, label):
+        if not self._is_lara_model():
+            return
+        diagnostics = self._model_ref().get_lara_diagnostic_average(reset=True)
+        if not diagnostics:
+            return
+        parts = [f'{key}: {value:.4f}' for key, value in diagnostics.items()]
+        print(f'\tLARA {label} AVG | ' + ' | '.join(parts))
  
 
     def vali(self, vali_data, vali_loader, criterion):
@@ -109,11 +118,13 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     with torch.cuda.amp.autocast():
                         outputs = self._forward_model(
                             batch_x, batch_x_mark, dec_inp, batch_y_mark,
-                            sample_index=sample_index, mode='val')
+                            sample_index=sample_index, mode='val',
+                            y_true=batch_y[:, -self.args.pred_len:, :].to(self.device))
                 else:
                     outputs = self._forward_model(
                         batch_x, batch_x_mark, dec_inp, batch_y_mark,
-                        sample_index=sample_index, mode='val')
+                        sample_index=sample_index, mode='val',
+                        y_true=batch_y[:, -self.args.pred_len:, :].to(self.device))
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
                 batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
@@ -220,6 +231,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
             print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
                 epoch + 1, train_steps, train_loss, vali_loss, test_loss))
+            self._print_lara_average_diagnostics(f'epoch_{epoch + 1}')
             early_stopping(vali_loss, self.model, path)
             if early_stopping.early_stop:
                 print("Early stopping")
@@ -265,11 +277,13 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     with torch.cuda.amp.autocast():
                         outputs = self._forward_model(
                             batch_x, batch_x_mark, dec_inp, batch_y_mark,
-                            sample_index=sample_index, mode='test')
+                            sample_index=sample_index, mode='test',
+                            y_true=batch_y[:, -self.args.pred_len:, :])
                 else:
                     outputs = self._forward_model(
                         batch_x, batch_x_mark, dec_inp, batch_y_mark,
-                        sample_index=sample_index, mode='test')
+                        sample_index=sample_index, mode='test',
+                        y_true=batch_y[:, -self.args.pred_len:, :])
 
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, :]
@@ -328,6 +342,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             dtw = 'Not calculated'
 
         mae, mse, rmse, mape, mspe = metric(preds, trues)
+        self._print_lara_average_diagnostics('test')
         print('mse:{}, mae:{}, dtw:{}'.format(mse, mae, dtw))
         f = open("result_long_term_forecast.txt", 'a')
         f.write(setting + "  \n")
