@@ -223,8 +223,9 @@ class Model(nn.Module):
             host_mse_per_query = (y_host.detach() - y_true.detach()).pow(2).mean(dim=(1, 2))
             final_mse_per_query = (y_final.detach() - y_true.detach()).pow(2).mean(dim=(1, 2))
             best_idx = scores.detach().argmax(dim=1)
-            supervised_alpha = alpha_star.gather(1, best_idx[:, None]).squeeze(1)
-            gate_target = supervised_alpha[:, None, None].expand_as(gate)
+            top_alpha = alpha_star.gather(1, best_idx[:, None]).squeeze(1)
+            weighted_alpha = (weights.detach() * alpha_star).sum(dim=1)
+            gate_target = weighted_alpha[:, None, None].expand_as(gate)
             gate_loss = F.mse_loss(gate, gate_target)
 
             diagnostics.update(
@@ -237,6 +238,8 @@ class Model(nn.Module):
                     "positive_utility": (utility > 1e-8).float().mean(),
                     "helpful_query": (utility.max(dim=1).values > 1e-8).float().mean(),
                     "alpha_star": alpha_star.mean(),
+                    "top_alpha": top_alpha.mean(),
+                    "weighted_alpha": weighted_alpha.mean(),
                     "gate_loss": gate_loss,
                 }
             )
