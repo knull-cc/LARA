@@ -112,6 +112,10 @@ def build_parser():
                         help='freeze the DLinear host and train only the LARA adapter')
     parser.add_argument('--lara_alpha_step', type=float, default=0.1,
                         help='alpha grid step for oracle utility labels')
+    parser.add_argument('--lara_offset_align', action='store_true', default=True,
+                        help='align candidate futures by query_last + (candidate_future - candidate_past_last)')
+    parser.add_argument('--no_lara_offset_align', action='store_false', dest='lara_offset_align',
+                        help='disable LARA offset-aligned candidate futures')
 
     # reproducibility
     parser.add_argument('--random_seed', type=int, default=2021, help='global random seed')

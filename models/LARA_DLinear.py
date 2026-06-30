@@ -54,6 +54,7 @@ class Model(nn.Module):
         self.lambda_rank = float(getattr(configs, "lara_lambda_rank", 0.3))
         self.lambda_sparse = float(getattr(configs, "lara_lambda_sparse", 0.01))
         self.sparse_mode = getattr(configs, "lara_sparse_mode", "softmax")
+        self.offset_align = bool(getattr(configs, "lara_offset_align", True))
 
         self.labeler = UtilityLabeler(alpha_step=float(getattr(configs, "lara_alpha_step", 0.1)))
         self.reranker = UtilityReranker(feature_dim=6)
@@ -121,6 +122,14 @@ class Model(nn.Module):
         ret_scale = y_ret.detach().std(dim=(1, 2))
         return torch.stack([top1, margin, entropy, active_k, host_scale, ret_scale], dim=1)
 
+    def _align_candidate_futures(self, x_enc, cand_pasts, cand_futures):
+        if not self.offset_align:
+            return cand_futures
+        query_last = x_enc[:, -1:, :].unsqueeze(1)
+        candidate_last = cand_pasts[:, :, -1:, :]
+        candidate_delta = cand_futures - candidate_last
+        return query_last + candidate_delta
+
     def _set_diagnostics(self, diagnostics):
         self.last_diagnostics = {
             key: float(value.detach().cpu()) if torch.is_tensor(value) else float(value)
@@ -159,7 +168,9 @@ class Model(nn.Module):
             sample_index=sample_index,
             train=(mode == "train"),
         )
+        cand_pasts = retrieval["pasts"].to(y_host.device)
         cand_futures = retrieval["futures"].to(y_host.device)
+        cand_futures = self._align_candidate_futures(x_enc, cand_pasts, cand_futures)
         scores = self.reranker(retrieval["features"].to(y_host.device))
         y_ret, weights = aggregate_candidates(
             scores,
@@ -176,6 +187,7 @@ class Model(nn.Module):
             "gate": gate.mean(),
             "active_k": (weights > 1e-3).float().sum(dim=1).mean(),
             "weight_entropy": normalized_entropy(weights),
+            "offset_align": y_host.new_tensor(1.0 if self.offset_align else 0.0),
         }
 
         if self.training and y_true is not None:
