@@ -13,7 +13,7 @@ for pred_len in 96; do
     --enc_in 21 --dec_in 21 --c_out 21 \
     --e_layers 2 --d_layers 1 --factor 3 --d_model 512 --d_ff 512 \
     --des LARA_weather96 --itr 1 --batch_size 32 --learning_rate 0.0003 \
-    --train_epochs 3 --patience 2 --num_workers 0 \
+    --train_epochs 10 --patience 3 --num_workers 0 \
     --lara_top_m 16 --lara_lambda_rank 0.3 --lara_lambda_sparse 0.01 \
     --lara_sparse_mode softmax --lara_gate scalar \
     $extra_args
