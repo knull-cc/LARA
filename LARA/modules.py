@@ -107,6 +107,24 @@ def listwise_kl_loss(scores, utility, temperature=0.1):
     return F.kl_div(log_prob, target, reduction="batchmean")
 
 
+def pairwise_utility_margin_loss(scores, utility, margin=0.2):
+    if scores.shape[1] < 2:
+        return scores.new_tensor(0.0)
+
+    with torch.no_grad():
+        best_idx = utility.argmax(dim=1)
+        worst_idx = utility.argmin(dim=1)
+        utility_gap = utility.gather(1, best_idx[:, None]) - utility.gather(1, worst_idx[:, None])
+        valid = utility_gap.squeeze(1) > 1e-8
+
+    if not valid.any():
+        return scores.new_tensor(0.0)
+
+    pos_score = scores.gather(1, best_idx[:, None]).squeeze(1)
+    neg_score = scores.gather(1, worst_idx[:, None]).squeeze(1)
+    return F.relu(float(margin) - (pos_score - neg_score))[valid].mean()
+
+
 def normalized_entropy(weights):
     entropy = -(weights * (weights.clamp_min(1e-8)).log()).sum(dim=1)
     return entropy.mean() / math.log(max(weights.shape[1], 2))

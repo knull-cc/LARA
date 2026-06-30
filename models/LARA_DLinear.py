@@ -12,6 +12,7 @@ from LARA.modules import (
     aggregate_candidates,
     listwise_kl_loss,
     normalized_entropy,
+    pairwise_utility_margin_loss,
     rank_correlation,
 )
 from LARA.retrieval import CandidateRetriever
@@ -53,6 +54,8 @@ class Model(nn.Module):
         self.temperature = float(getattr(configs, "lara_temperature", 0.1))
         self.rank_temperature = float(getattr(configs, "lara_rank_temperature", 0.1))
         self.lambda_rank = float(getattr(configs, "lara_lambda_rank", 0.3))
+        self.lambda_pair = float(getattr(configs, "lara_lambda_pair", 0.0))
+        self.pair_margin = float(getattr(configs, "lara_pair_margin", 0.2))
         self.lambda_sparse = float(getattr(configs, "lara_lambda_sparse", 0.01))
         self.lambda_gate = float(getattr(configs, "lara_lambda_gate", 0.0))
         self.sparse_mode = getattr(configs, "lara_sparse_mode", "softmax")
@@ -241,22 +244,28 @@ class Model(nn.Module):
                     "top_alpha": top_alpha.mean(),
                     "weighted_alpha": weighted_alpha.mean(),
                     "gate_loss": gate_loss,
+                    "score_std": scores.detach().std(dim=1).mean(),
+                    "utility_gap": (utility.max(dim=1).values - utility.min(dim=1).values).mean(),
                 }
             )
 
         if self.training and y_true is not None:
             rank_loss = listwise_kl_loss(scores, utility, temperature=self.rank_temperature)
+            pair_loss = pairwise_utility_margin_loss(scores, utility, margin=self.pair_margin)
             sparse_loss = normalized_entropy(weights)
             self.aux_loss = (
                 self.lambda_rank * rank_loss
+                + self.lambda_pair * pair_loss
                 + self.lambda_sparse * sparse_loss
                 + self.lambda_gate * gate_loss
             )
             diagnostics.update(
                 {
                     "rank_loss": rank_loss,
+                    "pair_loss": pair_loss,
                     "sparse_loss": sparse_loss,
                     "rank_corr": rank_correlation(utility, scores.detach()),
+                    "lambda_pair": y_host.new_tensor(self.lambda_pair),
                     "lambda_gate": y_host.new_tensor(self.lambda_gate),
                 }
             )

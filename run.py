@@ -95,6 +95,10 @@ def build_parser():
     parser.add_argument('--lara_temperature', type=float, default=0.1, help='LARA retrieval aggregation temperature')
     parser.add_argument('--lara_rank_temperature', type=float, default=0.1, help='LARA utility ranking temperature')
     parser.add_argument('--lara_lambda_rank', type=float, default=0.3, help='LARA rank loss weight')
+    parser.add_argument('--lara_lambda_pair', type=float, default=0.0,
+                        help='LARA pairwise utility margin loss weight')
+    parser.add_argument('--lara_pair_margin', type=float, default=0.2,
+                        help='LARA pairwise utility margin between best and worst candidate scores')
     parser.add_argument('--lara_lambda_sparse', type=float, default=0.01, help='LARA sparse entropy loss weight')
     parser.add_argument('--lara_lambda_gate', type=float, default=0.0, help='LARA supervised gate loss weight')
     parser.add_argument('--lara_sparse_mode', type=str, default='softmax', choices=['softmax', 'sparsemax'],
