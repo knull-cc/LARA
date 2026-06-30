@@ -114,12 +114,23 @@ class Model(nn.Module):
             f"key_mode={self.memory.key_mode}, top_m={self.top_m}"
         )
 
-    def _host_forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
+    def _host_forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec, sample_index=None):
+        def call_host():
+            if getattr(self.host, "supports_sample_index", False):
+                return self.host(
+                    x_enc,
+                    x_mark_enc,
+                    x_dec,
+                    x_mark_dec,
+                    sample_index=sample_index,
+                )
+            return self.host(x_enc, x_mark_enc, x_dec, x_mark_dec)
+
         if self.freeze_host:
             self.host.eval()
             with torch.no_grad():
-                return self.host(x_enc, x_mark_enc, x_dec, x_mark_dec)
-        return self.host(x_enc, x_mark_enc, x_dec, x_mark_dec)
+                return call_host()
+        return call_host()
 
     def _build_gate_stats(self, scores, weights, y_host, y_ret):
         sorted_scores = torch.sort(scores, dim=1, descending=True).values
@@ -178,12 +189,12 @@ class Model(nn.Module):
         mode="train",
         y_true=None,
     ):
-        y_host = self._host_forecast(x_enc, x_mark_enc, x_dec, x_mark_dec)
+        y_host = self._host_forecast(x_enc, x_mark_enc, x_dec, x_mark_dec, sample_index=sample_index)
         self.aux_loss = y_host.new_tensor(0.0)
 
         if not self.memory_prepared:
             if not self.warned_no_memory:
-                print("[LARA] memory is not prepared; falling back to plain DLinear host.")
+                print("[LARA] memory is not prepared; falling back to the plain host forecaster.")
                 self.warned_no_memory = True
             return y_host
 

@@ -50,7 +50,8 @@ def data_provider(args, flag):
         freq=freq,
         seasonal_patterns=None # We do not use this option.
     )
-    if getattr(args, 'model', '').startswith('LARA'):
+    model_name = getattr(args, 'model', '')
+    if model_name.startswith('LARA') or 'GTR' in model_name:
         data_set = IndexedDataset(data_set)
 
     print(flag, len(data_set))

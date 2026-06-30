@@ -60,6 +60,10 @@ def build_parser():
                         help='whether to use distilling in encoder (used in setting name)')
     parser.add_argument('--individual', action='store_true', default=False,
                         help='DLinear: a linear layer for each variate(channel) individually')
+    parser.add_argument('--cycle', type=int, default=24,
+                        help='cycle length for GTR-style global temporal retrieval')
+    parser.add_argument('--use_revin', type=int, default=1,
+                        help='GTR: 1 enables RevIN normalization, 0 disables it')
 
     # optimization
     parser.add_argument('--num_workers', type=int, default=10, help='data loader num workers')
@@ -116,9 +120,9 @@ def build_parser():
     parser.add_argument('--lara_gate', type=str, default='scalar', choices=['scalar', 'horizon'],
                         help='LARA fusion gate type')
     parser.add_argument('--lara_host_ckpt', type=str, default='',
-                        help='optional DLinear checkpoint loaded into the LARA host')
+                        help='optional host checkpoint loaded into the LARA host')
     parser.add_argument('--lara_freeze_host', action='store_true', default=False,
-                        help='freeze the DLinear host and train only the LARA adapter')
+                        help='freeze the host forecaster and train only the LARA adapter')
     parser.add_argument('--lara_alpha_step', type=float, default=0.1,
                         help='alpha grid step for oracle utility labels')
     parser.add_argument('--lara_offset_align', action='store_true', default=True,

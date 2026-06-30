@@ -44,6 +44,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
     def _is_lara_model(self):
         return bool(getattr(self._model_ref(), 'supports_lara_context', False))
 
+    def _uses_sample_index(self):
+        return bool(getattr(self._model_ref(), 'supports_sample_index', False))
+
     def _maybe_prepare_lara_memory(self, train_data):
         model = self._model_ref()
         if getattr(model, 'supports_lara_context', False) and not getattr(model, 'memory_prepared', False):
@@ -68,6 +71,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 sample_index=sample_index,
                 mode=mode,
                 y_true=y_true,
+            )
+        if self._uses_sample_index():
+            return self.model(
+                batch_x,
+                batch_x_mark,
+                dec_inp,
+                batch_y_mark,
+                sample_index=sample_index,
             )
         return self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
 
