@@ -99,6 +99,10 @@ def build_parser():
                         help='LARA pairwise utility margin loss weight')
     parser.add_argument('--lara_pair_margin', type=float, default=0.2,
                         help='LARA pairwise utility margin between best and worst candidate scores')
+    parser.add_argument('--lara_lambda_score', type=float, default=0.0,
+                        help='LARA score-to-utility alignment loss weight')
+    parser.add_argument('--lara_score_loss', type=str, default='mse', choices=['mse', 'corr'],
+                        help='LARA score alignment loss type')
     parser.add_argument('--lara_lambda_sparse', type=float, default=0.01, help='LARA sparse entropy loss weight')
     parser.add_argument('--lara_lambda_gate', type=float, default=0.0, help='LARA supervised gate loss weight')
     parser.add_argument('--lara_sparse_mode', type=str, default='softmax', choices=['softmax', 'sparsemax'],

@@ -125,6 +125,30 @@ def pairwise_utility_margin_loss(scores, utility, margin=0.2):
     return F.relu(float(margin) - (pos_score - neg_score))[valid].mean()
 
 
+def utility_score_alignment_loss(scores, utility, mode="mse"):
+    if scores.shape[1] < 2:
+        return scores.new_tensor(0.0)
+
+    utility = utility.detach()
+    score_centered = scores - scores.mean(dim=1, keepdim=True)
+    utility_centered = utility - utility.mean(dim=1, keepdim=True)
+    score_std = score_centered.std(dim=1, keepdim=True)
+    utility_std = utility_centered.std(dim=1, keepdim=True)
+    valid = (utility_std.squeeze(1) > 1e-8) & (score_std.squeeze(1) > 1e-8)
+
+    if not valid.any():
+        return scores.new_tensor(0.0)
+
+    score_z = score_centered[valid] / score_std[valid].clamp_min(1e-6)
+    utility_z = utility_centered[valid] / utility_std[valid].clamp_min(1e-6)
+    if mode == "mse":
+        return F.mse_loss(score_z, utility_z)
+    if mode == "corr":
+        corr = (score_z * utility_z).mean(dim=1)
+        return (1.0 - corr).mean()
+    raise ValueError(f"Unknown LARA score alignment loss: {mode}")
+
+
 def normalized_entropy(weights):
     entropy = -(weights * (weights.clamp_min(1e-8)).log()).sum(dim=1)
     return entropy.mean() / math.log(max(weights.shape[1], 2))
