@@ -109,16 +109,6 @@ def build_parser():
                         help='LARA score alignment loss type')
     parser.add_argument('--lara_lambda_sparse', type=float, default=0.01, help='LARA sparse entropy loss weight')
     parser.add_argument('--lara_lambda_gate', type=float, default=0.0, help='LARA supervised gate loss weight')
-    parser.add_argument('--lara_gate_loss', type=str, default='mse', choices=['mse', 'bce'],
-                        help='LARA supervised gate loss: mse for soft alpha targets, bce for oracle on/off targets')
-    parser.add_argument('--lara_lambda_agg', type=float, default=0.0,
-                        help='LARA oracle top-k aggregation distillation loss weight')
-    parser.add_argument('--lara_lambda_weight', type=float, default=0.0,
-                        help='LARA oracle top-k weight imitation loss weight')
-    parser.add_argument('--lara_agg_topk', type=int, default=5,
-                        help='number of oracle candidates used by LARA aggregation distillation')
-    parser.add_argument('--lara_lambda_risk', type=float, default=0.0,
-                        help='penalize horizons where fused forecast is worse than the frozen host')
     parser.add_argument('--lara_sparse_mode', type=str, default='softmax', choices=['softmax', 'sparsemax'],
                         help='LARA candidate weighting function')
     parser.add_argument('--lara_score_mode', type=str, default='global', choices=['global', 'horizon'],

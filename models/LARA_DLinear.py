@@ -63,11 +63,6 @@ class Model(nn.Module):
         self.score_loss_mode = getattr(configs, "lara_score_loss", "mse")
         self.lambda_sparse = float(getattr(configs, "lara_lambda_sparse", 0.01))
         self.lambda_gate = float(getattr(configs, "lara_lambda_gate", 0.0))
-        self.gate_loss_type = getattr(configs, "lara_gate_loss", "mse")
-        self.lambda_agg = float(getattr(configs, "lara_lambda_agg", 0.0))
-        self.lambda_weight = float(getattr(configs, "lara_lambda_weight", 0.0))
-        self.agg_topk = int(getattr(configs, "lara_agg_topk", 5))
-        self.lambda_risk = float(getattr(configs, "lara_lambda_risk", 0.0))
         self.sparse_mode = getattr(configs, "lara_sparse_mode", "softmax")
         self.score_mode = getattr(configs, "lara_score_mode", "global")
         self.gate_target_mode = getattr(configs, "lara_gate_target", "alpha")
@@ -222,37 +217,6 @@ class Model(nn.Module):
         host_loss = (y_host.detach() - y_true.detach()).pow(2).mean(dim=2)
         cand_loss = (cand_futures.detach() - y_true.detach().unsqueeze(1)).pow(2).mean(dim=3)
         return host_loss.unsqueeze(1) - cand_loss
-
-    def _oracle_topk_weights(self, utility):
-        k = max(1, min(int(self.agg_topk), int(utility.shape[1])))
-        if utility.dim() == 3:
-            flat_utility = utility.permute(0, 2, 1).reshape(-1, utility.shape[1])
-            top_idx = flat_utility.topk(k=k, dim=1).indices
-            flat_target = torch.zeros_like(flat_utility)
-            flat_target.scatter_(1, top_idx, 1.0 / float(k))
-            return flat_target.view(utility.shape[0], utility.shape[2], utility.shape[1]).permute(0, 2, 1)
-
-        top_idx = utility.topk(k=k, dim=1).indices
-        target = torch.zeros_like(utility)
-        target.scatter_(1, top_idx, 1.0 / float(k))
-        return target
-
-    @staticmethod
-    def _aggregate_with_weights(weights, cand_futures):
-        if weights.dim() == 3:
-            return torch.einsum("bmh,bmhc->bhc", weights, cand_futures)
-        return torch.einsum("bm,bmhc->bhc", weights, cand_futures)
-
-    def _supervised_gate_loss(self, gate, gate_target):
-        if self.gate_loss_type == "bce":
-            return F.binary_cross_entropy(gate.clamp(1e-5, 1.0 - 1e-5), gate_target)
-        return F.mse_loss(gate, gate_target)
-
-    @staticmethod
-    def _risk_loss(y_host, y_final, y_true):
-        host_horizon_err = (y_host.detach() - y_true.detach()).pow(2).mean(dim=2)
-        final_horizon_err = (y_final - y_true).pow(2).mean(dim=2)
-        return F.relu(final_horizon_err - host_horizon_err).mean()
 
     def _set_diagnostics(self, diagnostics):
         self.last_diagnostics = {
@@ -463,13 +427,7 @@ class Model(nn.Module):
             else:
                 weighted_alpha = (weights.detach() * alpha_star).sum(dim=1)
             gate_target = self._build_gate_target(gate, y_host, y_ret, y_true, weighted_alpha)
-            gate_loss = self._supervised_gate_loss(gate, gate_target)
-            oracle_weights = self._oracle_topk_weights(score_utility).detach()
-            oracle_y_ret = self._aggregate_with_weights(oracle_weights, cand_futures.detach())
-            agg_loss = F.mse_loss(y_ret, oracle_y_ret)
-            weight_loss = F.mse_loss(weights, oracle_weights)
-            risk_loss = self._risk_loss(y_host, y_final, y_true)
-            oracle_agg_mse = (oracle_y_ret - y_true.detach()).pow(2).mean(dim=(1, 2))
+            gate_loss = F.mse_loss(gate, gate_target)
 
             diagnostics.update(
                 {
@@ -486,10 +444,6 @@ class Model(nn.Module):
                     "weighted_alpha": weighted_alpha.mean(),
                     "gate_target": gate_target.mean(),
                     "gate_loss": gate_loss,
-                    "agg_loss": agg_loss,
-                    "weight_loss": weight_loss,
-                    "risk_loss": risk_loss,
-                    "oracle_train_agg_mse": oracle_agg_mse.mean(),
                     "score_std": scores.detach().std(dim=1, unbiased=False).mean(),
                     "utility_gap": (score_utility.max(dim=1).values - score_utility.min(dim=1).values).mean(),
                 }
@@ -506,9 +460,6 @@ class Model(nn.Module):
                 + self.lambda_score * score_loss
                 + self.lambda_sparse * sparse_loss
                 + self.lambda_gate * gate_loss
-                + self.lambda_agg * agg_loss
-                + self.lambda_weight * weight_loss
-                + self.lambda_risk * risk_loss
             )
             diagnostics.update(
                 {
@@ -520,9 +471,6 @@ class Model(nn.Module):
                     "lambda_pair": y_host.new_tensor(self.lambda_pair),
                     "lambda_score": y_host.new_tensor(self.lambda_score),
                     "lambda_gate": y_host.new_tensor(self.lambda_gate),
-                    "lambda_agg": y_host.new_tensor(self.lambda_agg),
-                    "lambda_weight": y_host.new_tensor(self.lambda_weight),
-                    "lambda_risk": y_host.new_tensor(self.lambda_risk),
                 }
             )
 
