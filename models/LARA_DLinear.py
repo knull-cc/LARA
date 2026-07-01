@@ -63,6 +63,7 @@ class Model(nn.Module):
         self.lambda_sparse = float(getattr(configs, "lara_lambda_sparse", 0.01))
         self.lambda_gate = float(getattr(configs, "lara_lambda_gate", 0.0))
         self.sparse_mode = getattr(configs, "lara_sparse_mode", "softmax")
+        self.gate_target_mode = getattr(configs, "lara_gate_target", "alpha")
         self.offset_align = bool(getattr(configs, "lara_offset_align", True))
 
         self.labeler = UtilityLabeler(alpha_step=float(getattr(configs, "lara_alpha_step", 0.1)))
@@ -281,6 +282,19 @@ class Model(nn.Module):
             self.oracle_count = 0
         return diagnostics
 
+    def _build_gate_target(self, gate, y_host, y_ret, y_true, weighted_alpha):
+        if self.gate_target_mode == "oracle":
+            host_horizon_err = (y_host.detach() - y_true.detach()).pow(2).mean(dim=2)
+            ret_horizon_err = (y_ret.detach() - y_true.detach()).pow(2).mean(dim=2)
+            if gate.shape[1] == self.pred_len:
+                return (ret_horizon_err < host_horizon_err).float().unsqueeze(-1)
+
+            host_err = host_horizon_err.mean(dim=1)
+            ret_err = ret_horizon_err.mean(dim=1)
+            return (ret_err < host_err).float().view(-1, 1, 1)
+
+        return weighted_alpha[:, None, None].expand_as(gate)
+
     def forward(
         self,
         x_enc,
@@ -347,7 +361,7 @@ class Model(nn.Module):
             best_idx = scores.detach().argmax(dim=1)
             top_alpha = alpha_star.gather(1, best_idx[:, None]).squeeze(1)
             weighted_alpha = (weights.detach() * alpha_star).sum(dim=1)
-            gate_target = weighted_alpha[:, None, None].expand_as(gate)
+            gate_target = self._build_gate_target(gate, y_host, y_ret, y_true, weighted_alpha)
             gate_loss = F.mse_loss(gate, gate_target)
 
             diagnostics.update(
@@ -362,6 +376,7 @@ class Model(nn.Module):
                     "alpha_star": alpha_star.mean(),
                     "top_alpha": top_alpha.mean(),
                     "weighted_alpha": weighted_alpha.mean(),
+                    "gate_target": gate_target.mean(),
                     "gate_loss": gate_loss,
                     "score_std": scores.detach().std(dim=1).mean(),
                     "utility_gap": (utility.max(dim=1).values - utility.min(dim=1).values).mean(),

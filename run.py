@@ -119,6 +119,8 @@ def build_parser():
                         help='extra training overlap mask margin in samples')
     parser.add_argument('--lara_gate', type=str, default='scalar', choices=['scalar', 'horizon'],
                         help='LARA fusion gate type')
+    parser.add_argument('--lara_gate_target', type=str, default='alpha', choices=['alpha', 'oracle'],
+                        help='LARA supervised gate target: alpha uses weighted interpolation labels; oracle uses true host-vs-retrieval benefit')
     parser.add_argument('--lara_host_ckpt', type=str, default='',
                         help='optional host checkpoint loaded into the LARA host')
     parser.add_argument('--lara_freeze_host', action='store_true', default=False,
