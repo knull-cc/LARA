@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# One-click entry for the current LARA oracle diagnostic experiment.
-# Default: ETTh1-96 with LARA_DLinear using sparsemax and supervised gate loss.
+# One-click entry for the current LARA experiment.
+# Default: ETTh1-96 two-stage run: train DLinear host, then freeze it and train LARA.
 # Run directly with:
 #   bash run_main.sh
 set -e
