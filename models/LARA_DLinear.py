@@ -216,7 +216,7 @@ class Model(nn.Module):
     def _horizon_utility_labels(self, y_host, y_true, cand_futures):
         host_loss = (y_host.detach() - y_true.detach()).pow(2).mean(dim=2)
         cand_loss = (cand_futures.detach() - y_true.detach().unsqueeze(1)).pow(2).mean(dim=3)
-        return (host_loss.unsqueeze(1) - cand_loss).clamp_min(0.0)
+        return host_loss.unsqueeze(1) - cand_loss
 
     def _set_diagnostics(self, diagnostics):
         self.last_diagnostics = {
@@ -437,6 +437,7 @@ class Model(nn.Module):
                     "oracle_gain": ((host_mse_per_query - oracle_mse_per_query)
                                     / host_mse_per_query.clamp_min(1e-8)).mean(),
                     "positive_utility": (utility > 1e-8).float().mean(),
+                    "positive_horizon_utility": (score_utility > 1e-8).float().mean(),
                     "helpful_query": (utility.max(dim=1).values > 1e-8).float().mean(),
                     "alpha_star": alpha_star.mean(),
                     "top_alpha": top_alpha.mean(),
