@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from LARA.memory import TimeSeriesMemory
 from LARA.modules import (
     FusionGate,
+    HorizonUtilityReranker,
     UtilityLabeler,
     UtilityReranker,
     aggregate_candidates,
@@ -63,12 +64,17 @@ class Model(nn.Module):
         self.lambda_sparse = float(getattr(configs, "lara_lambda_sparse", 0.01))
         self.lambda_gate = float(getattr(configs, "lara_lambda_gate", 0.0))
         self.sparse_mode = getattr(configs, "lara_sparse_mode", "softmax")
+        self.score_mode = getattr(configs, "lara_score_mode", "global")
         self.gate_target_mode = getattr(configs, "lara_gate_target", "alpha")
         self.offset_align = bool(getattr(configs, "lara_offset_align", True))
 
         self.labeler = UtilityLabeler(alpha_step=float(getattr(configs, "lara_alpha_step", 0.1)))
-        self.reranker = UtilityReranker(feature_dim=6)
-        self.gate = FusionGate(self.pred_len, gate_type=getattr(configs, "lara_gate", "scalar"))
+        if self.score_mode == "horizon":
+            self.reranker = HorizonUtilityReranker(feature_dim=13)
+            self.gate = FusionGate(self.pred_len, gate_type="horizon", stat_dim=7, per_horizon=True)
+        else:
+            self.reranker = UtilityReranker(feature_dim=6)
+            self.gate = FusionGate(self.pred_len, gate_type=getattr(configs, "lara_gate", "scalar"))
 
         self.memory = None
         self.retriever = None
@@ -150,6 +156,18 @@ class Model(nn.Module):
         return call_host()
 
     def _build_gate_stats(self, scores, weights, y_host, y_ret):
+        if scores.dim() == 3:
+            sorted_scores = torch.sort(scores, dim=1, descending=True).values
+            top1 = sorted_scores[:, 0, :]
+            margin = top1 - sorted_scores[:, 1, :] if scores.shape[1] > 1 else torch.zeros_like(top1)
+            entropy = -(weights * weights.clamp_min(1e-8).log()).sum(dim=1)
+            entropy = entropy / torch.log(torch.tensor(float(max(weights.shape[1], 2)), device=weights.device))
+            active_k = (weights > 1e-3).float().sum(dim=1) / float(max(weights.shape[1], 1))
+            host_level = y_host.detach().abs().mean(dim=2)
+            ret_level = y_ret.detach().abs().mean(dim=2)
+            correction = (y_ret.detach() - y_host.detach()).abs().mean(dim=2)
+            return torch.stack([top1, margin, entropy, active_k, host_level, ret_level, correction], dim=-1)
+
         sorted_scores = torch.sort(scores, dim=1, descending=True).values
         top1 = sorted_scores[:, 0]
         margin = top1 - sorted_scores[:, 1] if scores.shape[1] > 1 else torch.zeros_like(top1)
@@ -167,6 +185,38 @@ class Model(nn.Module):
         candidate_last = cand_pasts[:, :, -1:, :]
         candidate_delta = cand_futures - candidate_last
         return query_last + candidate_delta
+
+    def _build_horizon_score_features(self, base_features, cand_futures, y_host):
+        batch_size, num_candidates, horizon, _ = cand_futures.shape
+        base = base_features.unsqueeze(2).expand(-1, -1, horizon, -1)
+        cand_step = cand_futures.detach()
+        host_step = y_host.detach().unsqueeze(1)
+        delta = cand_step - host_step
+        horizon_pos = torch.linspace(
+            0.0,
+            1.0,
+            horizon,
+            device=cand_futures.device,
+            dtype=cand_futures.dtype,
+        ).view(1, 1, horizon, 1).expand(batch_size, num_candidates, -1, -1)
+        step_features = torch.cat(
+            [
+                horizon_pos,
+                cand_step.mean(dim=3, keepdim=True),
+                cand_step.std(dim=3, keepdim=True, unbiased=False),
+                host_step.expand_as(cand_step).mean(dim=3, keepdim=True),
+                host_step.expand_as(cand_step).std(dim=3, keepdim=True, unbiased=False),
+                delta.mean(dim=3, keepdim=True),
+                delta.abs().mean(dim=3, keepdim=True),
+            ],
+            dim=-1,
+        )
+        return torch.cat([base, step_features], dim=-1)
+
+    def _horizon_utility_labels(self, y_host, y_true, cand_futures):
+        host_loss = (y_host.detach() - y_true.detach()).pow(2).mean(dim=2)
+        cand_loss = (cand_futures.detach() - y_true.detach().unsqueeze(1)).pow(2).mean(dim=3)
+        return (host_loss.unsqueeze(1) - cand_loss).clamp_min(0.0)
 
     def _set_diagnostics(self, diagnostics):
         self.last_diagnostics = {
@@ -293,6 +343,10 @@ class Model(nn.Module):
             ret_err = ret_horizon_err.mean(dim=1)
             return (ret_err < host_err).float().view(-1, 1, 1)
 
+        if weighted_alpha.dim() == 2:
+            if gate.shape[1] == self.pred_len:
+                return weighted_alpha.unsqueeze(-1)
+            return weighted_alpha.mean(dim=1).view(-1, 1, 1)
         return weighted_alpha[:, None, None].expand_as(gate)
 
     def forward(
@@ -324,7 +378,12 @@ class Model(nn.Module):
         cand_pasts = retrieval["pasts"].to(y_host.device)
         cand_futures = retrieval["futures"].to(y_host.device)
         cand_futures = self._align_candidate_futures(x_enc, cand_pasts, cand_futures)
-        scores = self.reranker(retrieval["features"].to(y_host.device))
+        candidate_features = retrieval["features"].to(y_host.device)
+        if self.score_mode == "horizon":
+            score_features = self._build_horizon_score_features(candidate_features, cand_futures, y_host)
+            scores = self.reranker(score_features)
+        else:
+            scores = self.reranker(candidate_features)
         y_ret, weights = aggregate_candidates(
             scores,
             cand_futures,
@@ -343,10 +402,12 @@ class Model(nn.Module):
             "active_k": (weights > 1e-3).float().sum(dim=1).mean(),
             "weight_entropy": normalized_entropy(weights),
             "offset_align": y_host.new_tensor(1.0 if self.offset_align else 0.0),
+            "horizon_scorer": y_host.new_tensor(1.0 if self.score_mode == "horizon" else 0.0),
         }
 
         if y_true is not None:
             utility, alpha_star = self.labeler(y_host, y_true, cand_futures)
+            score_utility = self._horizon_utility_labels(y_host, y_true, cand_futures) if scores.dim() == 3 else utility
             oracle_mse_per_query = (
                 (y_host.detach().unsqueeze(1) * (1.0 - alpha_star[:, :, None, None])
                  + cand_futures.detach() * alpha_star[:, :, None, None]
@@ -358,9 +419,13 @@ class Model(nn.Module):
             )
             host_mse_per_query = (y_host.detach() - y_true.detach()).pow(2).mean(dim=(1, 2))
             final_mse_per_query = (y_final.detach() - y_true.detach()).pow(2).mean(dim=(1, 2))
-            best_idx = scores.detach().argmax(dim=1)
+            score_summary = scores.detach().mean(dim=2) if scores.dim() == 3 else scores.detach()
+            best_idx = score_summary.argmax(dim=1)
             top_alpha = alpha_star.gather(1, best_idx[:, None]).squeeze(1)
-            weighted_alpha = (weights.detach() * alpha_star).sum(dim=1)
+            if weights.dim() == 3:
+                weighted_alpha = (weights.detach() * alpha_star.unsqueeze(-1)).sum(dim=1)
+            else:
+                weighted_alpha = (weights.detach() * alpha_star).sum(dim=1)
             gate_target = self._build_gate_target(gate, y_host, y_ret, y_true, weighted_alpha)
             gate_loss = F.mse_loss(gate, gate_target)
 
@@ -378,15 +443,15 @@ class Model(nn.Module):
                     "weighted_alpha": weighted_alpha.mean(),
                     "gate_target": gate_target.mean(),
                     "gate_loss": gate_loss,
-                    "score_std": scores.detach().std(dim=1).mean(),
-                    "utility_gap": (utility.max(dim=1).values - utility.min(dim=1).values).mean(),
+                    "score_std": scores.detach().std(dim=1, unbiased=False).mean(),
+                    "utility_gap": (score_utility.max(dim=1).values - score_utility.min(dim=1).values).mean(),
                 }
             )
 
         if self.training and y_true is not None:
-            rank_loss = listwise_kl_loss(scores, utility, temperature=self.rank_temperature)
-            pair_loss = pairwise_utility_margin_loss(scores, utility, margin=self.pair_margin)
-            score_loss = utility_score_alignment_loss(scores, utility, mode=self.score_loss_mode)
+            rank_loss = listwise_kl_loss(scores, score_utility, temperature=self.rank_temperature)
+            pair_loss = pairwise_utility_margin_loss(scores, score_utility, margin=self.pair_margin)
+            score_loss = utility_score_alignment_loss(scores, score_utility, mode=self.score_loss_mode)
             sparse_loss = normalized_entropy(weights)
             self.aux_loss = (
                 self.lambda_rank * rank_loss
@@ -401,7 +466,7 @@ class Model(nn.Module):
                     "pair_loss": pair_loss,
                     "score_loss": score_loss,
                     "sparse_loss": sparse_loss,
-                    "rank_corr": rank_correlation(utility, scores.detach()),
+                    "rank_corr": rank_correlation(score_utility, scores.detach()),
                     "lambda_pair": y_host.new_tensor(self.lambda_pair),
                     "lambda_score": y_host.new_tensor(self.lambda_score),
                     "lambda_gate": y_host.new_tensor(self.lambda_gate),

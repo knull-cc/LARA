@@ -111,6 +111,8 @@ def build_parser():
     parser.add_argument('--lara_lambda_gate', type=float, default=0.0, help='LARA supervised gate loss weight')
     parser.add_argument('--lara_sparse_mode', type=str, default='softmax', choices=['softmax', 'sparsemax'],
                         help='LARA candidate weighting function')
+    parser.add_argument('--lara_score_mode', type=str, default='global', choices=['global', 'horizon'],
+                        help='LARA scorer mode: global scores each candidate once; horizon scores each candidate per forecast step')
     parser.add_argument('--lara_key_mode', type=str, default='auto', choices=['auto', 'flatten', 'mean'],
                         help='LARA memory key mode')
     parser.add_argument('--lara_max_key_dim', type=int, default=8192,

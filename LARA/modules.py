@@ -55,6 +55,22 @@ class UtilityReranker(nn.Module):
         return self.net(candidate_features).squeeze(-1)
 
 
+class HorizonUtilityReranker(nn.Module):
+    def __init__(self, feature_dim, hidden_dim=128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(feature_dim),
+            nn.Linear(feature_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.GELU(),
+            nn.Linear(hidden_dim // 2, 1),
+        )
+
+    def forward(self, candidate_features):
+        return self.net(candidate_features).squeeze(-1)
+
+
 def sparsemax(logits, dim=-1):
     logits = logits - logits.max(dim=dim, keepdim=True).values
     zs = torch.sort(logits, descending=True, dim=dim).values
@@ -76,16 +92,20 @@ def aggregate_candidates(scores, candidate_futures, temperature=0.1, mode="softm
     else:
         raise ValueError(f"Unknown LARA sparse mode: {mode}")
 
-    y_ret = torch.einsum("bm,bmhc->bhc", weights, candidate_futures)
+    if weights.dim() == 3:
+        y_ret = torch.einsum("bmh,bmhc->bhc", weights, candidate_futures)
+    else:
+        y_ret = torch.einsum("bm,bmhc->bhc", weights, candidate_futures)
     return y_ret, weights
 
 
 class FusionGate(nn.Module):
-    def __init__(self, pred_len, gate_type="scalar", stat_dim=6):
+    def __init__(self, pred_len, gate_type="scalar", stat_dim=6, per_horizon=False):
         super().__init__()
         self.pred_len = pred_len
         self.gate_type = gate_type
-        output_dim = pred_len if gate_type == "horizon" else 1
+        self.per_horizon = per_horizon
+        output_dim = 1 if per_horizon else pred_len if gate_type == "horizon" else 1
         self.net = nn.Sequential(
             nn.LayerNorm(stat_dim),
             nn.Linear(stat_dim, 64),
@@ -95,6 +115,8 @@ class FusionGate(nn.Module):
         nn.init.constant_(self.net[-1].bias, -1.5)
 
     def forward(self, stats):
+        if stats.dim() == 3:
+            return torch.sigmoid(self.net(stats))
         gate = torch.sigmoid(self.net(stats))
         if self.gate_type == "horizon":
             return gate.unsqueeze(-1)
@@ -102,12 +124,18 @@ class FusionGate(nn.Module):
 
 
 def listwise_kl_loss(scores, utility, temperature=0.1):
+    if scores.dim() == 3:
+        scores = scores.permute(0, 2, 1).reshape(-1, scores.shape[1])
+        utility = utility.permute(0, 2, 1).reshape(-1, utility.shape[1])
     target = F.softmax(utility / max(temperature, 1e-6), dim=1)
     log_prob = F.log_softmax(scores / max(temperature, 1e-6), dim=1)
     return F.kl_div(log_prob, target, reduction="batchmean")
 
 
 def pairwise_utility_margin_loss(scores, utility, margin=0.2):
+    if scores.dim() == 3:
+        scores = scores.permute(0, 2, 1).reshape(-1, scores.shape[1])
+        utility = utility.permute(0, 2, 1).reshape(-1, utility.shape[1])
     if scores.shape[1] < 2:
         return scores.new_tensor(0.0)
 
@@ -126,6 +154,9 @@ def pairwise_utility_margin_loss(scores, utility, margin=0.2):
 
 
 def utility_score_alignment_loss(scores, utility, mode="mse"):
+    if scores.dim() == 3:
+        scores = scores.permute(0, 2, 1).reshape(-1, scores.shape[1])
+        utility = utility.permute(0, 2, 1).reshape(-1, utility.shape[1])
     if scores.shape[1] < 2:
         return scores.new_tensor(0.0)
 
@@ -155,6 +186,9 @@ def normalized_entropy(weights):
 
 
 def rank_correlation(a, b):
+    if a.dim() == 3:
+        a = a.permute(0, 2, 1).reshape(-1, a.shape[1])
+        b = b.permute(0, 2, 1).reshape(-1, b.shape[1])
     if a.shape[1] < 2:
         return torch.zeros((), device=a.device)
     ar = torch.argsort(torch.argsort(a, dim=1), dim=1).float()
