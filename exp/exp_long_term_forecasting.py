@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from torch import optim
 import os
+import json
 import time
 import warnings
 import numpy as np
@@ -107,6 +108,59 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             return
         parts = [f'{key}: {value:.4f}' for key, value in diagnostics.items()]
         print(f'\tLARA {label} AVG | ' + ' | '.join(parts))
+
+    def _collect_lara_oracle_diagnostics(self, reset=False):
+        if not self._is_lara_model():
+            return {}
+        collector = getattr(self._model_ref(), 'get_lara_oracle_average', None)
+        if collector is None:
+            return {}
+        return collector(reset=reset)
+
+    def _print_lara_oracle_diagnostics(self, diagnostics):
+        if not diagnostics:
+            return
+        headline_keys = [
+            'host_mse',
+            'retrieval_mse',
+            'lara_final_mse',
+            'oracle_gate_mse',
+            'oracle_horizon_gate_mse',
+        ]
+        print('\tLARA ORACLE DIAGNOSTIC')
+        for key in headline_keys:
+            if key in diagnostics:
+                print(f'\t  {key}: {diagnostics[key]:.6f}')
+
+        curve_items = [
+            (key, diagnostics[key])
+            for key in sorted(diagnostics)
+            if key.startswith('oracle_candidate_m') and key.endswith('_mse')
+        ]
+        if curve_items:
+            curve = ' | '.join(f"{key.replace('oracle_candidate_', '').replace('_mse', '')}: {value:.6f}"
+                               for key, value in curve_items)
+            print('\t  candidate_best_curve | ' + curve)
+
+        rate_items = [
+            (key, diagnostics[key])
+            for key in sorted(diagnostics)
+            if key.startswith('oracle_candidate_m') and key.endswith('_beneficial_rate')
+        ]
+        if rate_items:
+            rates = ' | '.join(f"{key.replace('oracle_candidate_', '').replace('_beneficial_rate', '')}: {value:.4f}"
+                               for key, value in rate_items)
+            print('\t  beneficial_rate | ' + rates)
+
+        aggregation_items = [
+            (key, diagnostics[key])
+            for key in sorted(diagnostics)
+            if key.startswith('oracle_aggregation_top') and key.endswith('_mse')
+        ]
+        if aggregation_items:
+            aggs = ' | '.join(f"{key.replace('oracle_aggregation_', '').replace('_mse', '')}: {value:.6f}"
+                              for key, value in aggregation_items)
+            print('\t  aggregation | ' + aggs)
  
 
     def vali(self, vali_data, vali_loader, criterion):
@@ -354,16 +408,24 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         mae, mse, rmse, mape, mspe = metric(preds, trues)
         self._print_lara_average_diagnostics('test')
+        oracle_diagnostics = self._collect_lara_oracle_diagnostics(reset=True)
+        self._print_lara_oracle_diagnostics(oracle_diagnostics)
         print('mse:{}, mae:{}, dtw:{}'.format(mse, mae, dtw))
         f = open("result_long_term_forecast.txt", 'a')
         f.write(setting + "  \n")
         f.write('mse:{}, mae:{}, dtw:{}'.format(mse, mae, dtw))
         f.write('\n')
+        if oracle_diagnostics:
+            f.write('lara_oracle:' + json.dumps(oracle_diagnostics, sort_keys=True))
+            f.write('\n')
         f.write('\n')
         f.close()
 
         np.save(folder_path + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
         np.save(folder_path + 'pred.npy', preds)
         np.save(folder_path + 'true.npy', trues)
+        if oracle_diagnostics:
+            with open(folder_path + 'lara_oracle_diagnostics.json', 'w') as oracle_file:
+                json.dump(oracle_diagnostics, oracle_file, indent=2, sort_keys=True)
 
         return

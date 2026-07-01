@@ -129,6 +129,10 @@ def build_parser():
                         help='align candidate futures by query_last + (candidate_future - candidate_past_last)')
     parser.add_argument('--no_lara_offset_align', action='store_false', dest='lara_offset_align',
                         help='disable LARA offset-aligned candidate futures')
+    parser.add_argument('--lara_oracle_ms', type=str, default='1,3,5,10,20,50',
+                        help='comma-separated M values for LARA oracle candidate top-M curves')
+    parser.add_argument('--lara_oracle_topk', type=str, default='1,3,5',
+                        help='comma-separated k values for LARA oracle true-error top-k average aggregation')
 
     # reproducibility
     parser.add_argument('--random_seed', type=int, default=2021, help='global random seed')

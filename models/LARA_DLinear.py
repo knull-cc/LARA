@@ -1,4 +1,5 @@
 import os
+from collections import defaultdict
 
 import torch
 import torch.nn as nn
@@ -76,6 +77,21 @@ class Model(nn.Module):
         self.last_diagnostics = {}
         self.diagnostic_sums = {}
         self.diagnostic_count = 0
+        self.oracle_sums = defaultdict(float)
+        self.oracle_count = 0
+
+    @staticmethod
+    def _parse_int_list(value, default):
+        if value is None:
+            return list(default)
+        if isinstance(value, (list, tuple)):
+            return [int(item) for item in value]
+        parsed = []
+        for item in str(value).split(","):
+            item = item.strip()
+            if item:
+                parsed.append(int(item))
+        return parsed or list(default)
 
     def _load_host_checkpoint(self, checkpoint_path):
         if not checkpoint_path:
@@ -178,6 +194,93 @@ class Model(nn.Module):
             self.diagnostic_count = 0
         return diagnostics
 
+    def _add_oracle_sum(self, key, values):
+        if torch.is_tensor(values):
+            values = values.detach()
+            self.oracle_sums[key] += float(values.sum().cpu())
+            return
+        self.oracle_sums[key] += float(values)
+
+    def _accumulate_oracle_diagnostics(self, y_host, y_ret, y_final, y_true, cand_futures):
+        with torch.no_grad():
+            batch_size = int(y_true.shape[0])
+            self.oracle_count += batch_size
+
+            host_err = (y_host - y_true).pow(2).mean(dim=(1, 2))
+            ret_err = (y_ret - y_true).pow(2).mean(dim=(1, 2))
+            final_err = (y_final - y_true).pow(2).mean(dim=(1, 2))
+            cand_err = (cand_futures - y_true.unsqueeze(1)).pow(2).mean(dim=(2, 3))
+            max_candidates = cand_err.shape[1]
+
+            self._add_oracle_sum("candidate_pool_size", batch_size * max_candidates)
+            self._add_oracle_sum("host_mse", host_err)
+            self._add_oracle_sum("retrieval_mse", ret_err)
+            self._add_oracle_sum("lara_final_mse", final_err)
+
+            oracle_gate_err = torch.minimum(host_err, ret_err)
+            self._add_oracle_sum("oracle_gate_mse", oracle_gate_err)
+            self._add_oracle_sum("oracle_gate_beneficial_rate", (ret_err < host_err).float())
+            self._add_oracle_sum("oracle_gate_gain", host_err - oracle_gate_err)
+
+            host_horizon_err = (y_host - y_true).pow(2).mean(dim=2)
+            ret_horizon_err = (y_ret - y_true).pow(2).mean(dim=2)
+            horizon_gate_err = torch.minimum(host_horizon_err, ret_horizon_err).mean(dim=1)
+            self._add_oracle_sum("oracle_horizon_gate_mse", horizon_gate_err)
+            self._add_oracle_sum(
+                "oracle_horizon_gate_beneficial_rate",
+                (ret_horizon_err < host_horizon_err).float().mean(dim=1),
+            )
+            self._add_oracle_sum("oracle_horizon_gate_gain", host_err - horizon_gate_err)
+
+            top_m_values = self._parse_int_list(
+                getattr(self.configs, "lara_oracle_ms", None),
+                default=[1, 3, 5, 10, 20, 50],
+            )
+            for requested_m in top_m_values:
+                m = int(requested_m)
+                if m <= 0 or m > max_candidates:
+                    continue
+                best_err = cand_err[:, :m].min(dim=1).values
+                prefix = f"oracle_candidate_m{m}"
+                self._add_oracle_sum(f"{prefix}_mse", best_err)
+                self._add_oracle_sum(f"{prefix}_beneficial_rate", (best_err < host_err).float())
+                self._add_oracle_sum(f"{prefix}_gain", host_err - best_err)
+
+                cand_horizon_err = (cand_futures[:, :m] - y_true.unsqueeze(1)).pow(2).mean(dim=3)
+                best_horizon_err = cand_horizon_err.min(dim=1).values.mean(dim=1)
+                horizon_prefix = f"oracle_candidate_horizon_m{requested_m}"
+                self._add_oracle_sum(f"{horizon_prefix}_mse", best_horizon_err)
+                self._add_oracle_sum(f"{horizon_prefix}_gain", host_err - best_horizon_err)
+
+            topk_values = self._parse_int_list(
+                getattr(self.configs, "lara_oracle_topk", None),
+                default=[1, 3, 5],
+            )
+            sorted_idx = cand_err.argsort(dim=1)
+            for requested_k in topk_values:
+                k = int(requested_k)
+                if k <= 0 or k > max_candidates:
+                    continue
+                gather_idx = sorted_idx[:, :k, None, None].expand(-1, -1, cand_futures.shape[2], cand_futures.shape[3])
+                topk_futures = cand_futures.gather(1, gather_idx)
+                topk_avg = topk_futures.mean(dim=1)
+                topk_err = (topk_avg - y_true).pow(2).mean(dim=(1, 2))
+                prefix = f"oracle_aggregation_top{k}_mse"
+                self._add_oracle_sum(prefix, topk_err)
+                self._add_oracle_sum(f"oracle_aggregation_top{k}_gain", host_err - topk_err)
+
+    def get_lara_oracle_average(self, reset=False):
+        if self.oracle_count == 0:
+            return {}
+        diagnostics = {
+            key: value / self.oracle_count
+            for key, value in sorted(self.oracle_sums.items())
+        }
+        if reset:
+            self.oracle_sums = defaultdict(float)
+            self.oracle_count = 0
+        return diagnostics
+
     def forward(
         self,
         x_enc,
@@ -218,6 +321,8 @@ class Model(nn.Module):
         gate_stats = self._build_gate_stats(scores, weights, y_host, y_ret)
         gate = self.gate(gate_stats)
         y_final = (1.0 - gate) * y_host + gate * y_ret
+        if y_true is not None and mode == "test":
+            self._accumulate_oracle_diagnostics(y_host.detach(), y_ret.detach(), y_final.detach(), y_true.detach(), cand_futures.detach())
 
         diagnostics = {
             "gate": gate.mean(),
