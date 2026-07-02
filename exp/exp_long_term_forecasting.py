@@ -36,7 +36,13 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         return model_optim
 
     def _select_criterion(self):
-        criterion = nn.MSELoss()
+        loss_name = str(getattr(self.args, 'loss', 'MSE')).lower()
+        if loss_name in ('mae', 'l1'):
+            criterion = nn.L1Loss()
+        elif loss_name in ('huber', 'smoothl1', 'smooth_l1'):
+            criterion = nn.SmoothL1Loss()
+        else:
+            criterion = nn.MSELoss()
         return criterion
 
     def _model_ref(self):

@@ -69,6 +69,8 @@ class Model(nn.Module):
         self.offset_align = bool(getattr(configs, "lara_offset_align", True))
         self.fusion_mode = getattr(configs, "lara_fusion", "gate")
         self.candidate_source = getattr(configs, "lara_candidate_source", "future")
+        self.utility_loss_mode = getattr(configs, "lara_utility_loss", "mse")
+        self.huber_delta = float(getattr(configs, "lara_huber_delta", 1.0))
         self.max_amp = float(getattr(configs, "lara_max_amp", 1.0))
         self.alpha_max = float(getattr(configs, "lara_alpha_max", 1.0))
         self.lambda_amp = float(getattr(configs, "lara_lambda_amp", 0.0))
@@ -259,9 +261,27 @@ class Model(nn.Module):
         )
         return torch.cat([base, step_features], dim=-1)
 
+    def _point_loss(self, pred, true):
+        if self.utility_loss_mode == "mae":
+            return (pred - true).abs()
+        if self.utility_loss_mode == "huber":
+            return F.smooth_l1_loss(
+                pred,
+                true.expand_as(pred),
+                reduction="none",
+                beta=self.huber_delta,
+            )
+        return (pred - true).pow(2)
+
+    def _horizon_loss(self, pred, true):
+        return self._point_loss(pred, true).mean(dim=-1)
+
+    def _sequence_loss(self, pred, true):
+        return self._point_loss(pred, true).mean(dim=(-1, -2))
+
     def _horizon_utility_labels(self, y_host, y_true, cand_futures):
-        host_loss = (y_host.detach() - y_true.detach()).pow(2).mean(dim=2)
-        cand_loss = (cand_futures.detach() - y_true.detach().unsqueeze(1)).pow(2).mean(dim=3)
+        host_loss = self._horizon_loss(y_host.detach(), y_true.detach())
+        cand_loss = self._horizon_loss(cand_futures.detach(), y_true.detach().unsqueeze(1))
         return host_loss.unsqueeze(1) - cand_loss
 
     def _residual_utility_labels(self, y_host, y_true, cand_futures):
@@ -270,7 +290,7 @@ class Model(nn.Module):
             true = y_true.detach()
             cand = cand_futures.detach()
             delta = cand - host.unsqueeze(1)
-            host_horizon_loss = (host - true).pow(2).mean(dim=2)
+            host_horizon_loss = self._horizon_loss(host, true)
             host_loss = host_horizon_loss.mean(dim=1, keepdim=True)
 
             max_alpha = max(self.alpha_max, 0.0)
@@ -287,7 +307,7 @@ class Model(nn.Module):
             best_horizon_alpha = torch.zeros(cand.shape[:2] + (host.shape[1],), device=host.device, dtype=host.dtype)
             for alpha in alpha_grid:
                 mixed = host.unsqueeze(1) + alpha * delta
-                horizon_loss = (mixed - true.unsqueeze(1)).pow(2).mean(dim=3)
+                horizon_loss = self._horizon_loss(mixed, true.unsqueeze(1))
                 loss = horizon_loss.mean(dim=2)
                 if best_loss is None:
                     best_loss = loss
@@ -508,8 +528,8 @@ class Model(nn.Module):
 
     def _build_gate_target(self, gate, y_host, y_ret, y_true, weighted_alpha):
         if self.gate_target_mode == "oracle":
-            host_horizon_err = (y_host.detach() - y_true.detach()).pow(2).mean(dim=2)
-            ret_horizon_err = (y_ret.detach() - y_true.detach()).pow(2).mean(dim=2)
+            host_horizon_err = self._horizon_loss(y_host.detach(), y_true.detach())
+            ret_horizon_err = self._horizon_loss(y_ret.detach(), y_true.detach())
             if gate.shape[1] == self.pred_len:
                 return (ret_horizon_err < host_horizon_err).float().unsqueeze(-1)
 
@@ -601,6 +621,7 @@ class Model(nn.Module):
             "union_extra_m": retrieval.get("union_extra_m", y_host.new_zeros(y_host.shape[0])).float().mean(),
             "residual_amp": y_host.new_tensor(1.0 if self.fusion_mode == "residual_amp" else 0.0),
             "residual_memory": y_host.new_tensor(1.0 if self.candidate_source == "residual" else 0.0),
+            "mae_utility": y_host.new_tensor(1.0 if self.utility_loss_mode == "mae" else 0.0),
             "max_amp": y_host.new_tensor(self.max_amp),
         }
 
@@ -654,8 +675,8 @@ class Model(nn.Module):
                 if self.teacher_gate and self.fusion_mode == "residual_amp":
                     gate_target = self._teacher_gate_target(gate, y_host.detach(), y_true.detach(), teacher_y.detach())
                     gate_loss = F.mse_loss(gate, gate_target)
-            host_loss_for_risk = (y_host.detach() - y_true.detach()).pow(2).mean(dim=(1, 2))
-            final_loss_for_risk = (y_final - y_true).pow(2).mean(dim=(1, 2))
+            host_loss_for_risk = self._sequence_loss(y_host.detach(), y_true.detach())
+            final_loss_for_risk = self._sequence_loss(y_final, y_true)
             risk_loss = F.relu(final_loss_for_risk - host_loss_for_risk + self.risk_margin).mean()
 
             diagnostics.update(

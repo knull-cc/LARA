@@ -118,6 +118,10 @@ def build_parser():
                         help='future uses aligned retrieved futures; residual uses train host residuals as retrieved corrections')
     parser.add_argument('--lara_residual_batch_size', type=int, default=256,
                         help='batch size for precomputing train host residual memory')
+    parser.add_argument('--lara_utility_loss', type=str, default='mse', choices=['mse', 'mae', 'huber'],
+                        help='loss used for LARA utility labels, gate targets, and risk control')
+    parser.add_argument('--lara_huber_delta', type=float, default=1.0,
+                        help='Huber delta for LARA utility labels when lara_utility_loss=huber')
     parser.add_argument('--lara_max_amp', type=float, default=1.0,
                         help='maximum residual amplification strength when lara_fusion=residual_amp')
     parser.add_argument('--lara_alpha_max', type=float, default=1.0,
