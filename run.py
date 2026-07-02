@@ -124,6 +124,18 @@ def build_parser():
                         help='risk loss weight penalizing final forecasts worse than host')
     parser.add_argument('--lara_risk_margin', type=float, default=0.0,
                         help='allowed final-vs-host loss margin before risk penalty')
+    parser.add_argument('--lara_distill_topk', type=int, default=0,
+                        help='oracle top-k candidates used to distill learned retrieval aggregation; 0 disables')
+    parser.add_argument('--lara_distill_mode', type=str, default='horizon', choices=['sequence', 'horizon'],
+                        help='oracle distillation target: whole-sequence top-k or horizon-wise top-k')
+    parser.add_argument('--lara_distill_temperature', type=float, default=0.05,
+                        help='temperature for oracle top-k weight distillation')
+    parser.add_argument('--lara_lambda_teacher', type=float, default=0.0,
+                        help='loss weight for matching retrieval forecast to oracle top-k teacher forecast')
+    parser.add_argument('--lara_lambda_weight', type=float, default=0.0,
+                        help='loss weight for matching scorer weights to oracle top-k weights')
+    parser.add_argument('--lara_teacher_gate', action='store_true', default=False,
+                        help='use oracle top-k teacher forecast to supervise residual amplification gate')
     parser.add_argument('--lara_temperature', type=float, default=0.1, help='LARA retrieval aggregation temperature')
     parser.add_argument('--lara_rank_temperature', type=float, default=0.1, help='LARA utility ranking temperature')
     parser.add_argument('--lara_lambda_rank', type=float, default=0.3, help='LARA rank loss weight')

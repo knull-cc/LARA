@@ -73,6 +73,12 @@ class Model(nn.Module):
         self.lambda_amp = float(getattr(configs, "lara_lambda_amp", 0.0))
         self.lambda_risk = float(getattr(configs, "lara_lambda_risk", 0.0))
         self.risk_margin = float(getattr(configs, "lara_risk_margin", 0.0))
+        self.distill_topk = int(getattr(configs, "lara_distill_topk", 0))
+        self.distill_mode = getattr(configs, "lara_distill_mode", "horizon")
+        self.distill_temperature = float(getattr(configs, "lara_distill_temperature", 0.05))
+        self.lambda_teacher = float(getattr(configs, "lara_lambda_teacher", 0.0))
+        self.lambda_weight = float(getattr(configs, "lara_lambda_weight", 0.0))
+        self.teacher_gate = bool(getattr(configs, "lara_teacher_gate", False))
 
         self.labeler = UtilityLabeler(alpha_step=float(getattr(configs, "lara_alpha_step", 0.1)))
         if self.score_mode == "horizon":
@@ -279,6 +285,86 @@ class Model(nn.Module):
             utility = host_loss - best_loss
             horizon_utility = host_horizon_loss.unsqueeze(1) - best_horizon_loss
             return utility, best_alpha, horizon_utility, best_horizon_alpha
+
+    def _oracle_topk_teacher(self, y_true, cand_futures):
+        k = min(max(self.distill_topk, 1), cand_futures.shape[1])
+        with torch.no_grad():
+            if self.distill_mode == "sequence":
+                cand_err = (cand_futures - y_true.unsqueeze(1)).pow(2).mean(dim=(2, 3))
+                top_idx = cand_err.topk(k, dim=1, largest=False).indices
+                gather_idx = top_idx[:, :, None, None].expand(
+                    -1,
+                    -1,
+                    cand_futures.shape[2],
+                    cand_futures.shape[3],
+                )
+                teacher = cand_futures.gather(1, gather_idx).mean(dim=1)
+                target_weights = cand_futures.new_zeros(cand_futures.shape[:2])
+                target_weights.scatter_add_(
+                    1,
+                    top_idx,
+                    cand_futures.new_full(top_idx.shape, 1.0 / float(k)),
+                )
+                return teacher, target_weights
+
+            cand_horizon_err = (cand_futures - y_true.unsqueeze(1)).pow(2).mean(dim=3)
+            top_idx = cand_horizon_err.topk(k, dim=1, largest=False).indices
+            gather_idx = top_idx[:, :, :, None].expand(-1, -1, -1, cand_futures.shape[3])
+            teacher = cand_futures.gather(1, gather_idx).mean(dim=1)
+            target_weights = cand_futures.new_zeros(cand_futures.shape[:3])
+            target_weights.scatter_add_(
+                1,
+                top_idx,
+                cand_futures.new_full(top_idx.shape, 1.0 / float(k)),
+            )
+            return teacher, target_weights
+
+    def _weight_distill_loss(self, scores, target_weights):
+        if target_weights.dim() == 3 and scores.dim() == 2:
+            target_weights = target_weights.mean(dim=2)
+        elif target_weights.dim() == 2 and scores.dim() == 3:
+            target_weights = target_weights.unsqueeze(-1).expand_as(scores)
+        log_prob = F.log_softmax(scores / max(self.distill_temperature, 1e-6), dim=1)
+        return -(target_weights.detach() * log_prob).sum(dim=1).mean()
+
+    def _teacher_gate_target(self, gate, y_host, y_true, teacher_y):
+        with torch.no_grad():
+            step = float(getattr(self.configs, "lara_alpha_step", 0.1))
+            if step <= 0:
+                step = 0.1
+            alpha_grid = torch.arange(0.0, self.max_amp + 1e-6, step, device=y_host.device, dtype=y_host.dtype)
+            if alpha_grid.numel() == 0 or float(alpha_grid[-1]) < self.max_amp:
+                alpha_grid = torch.cat([alpha_grid, y_host.new_tensor([self.max_amp])])
+
+            delta = teacher_y - y_host
+            if gate.shape[1] == self.pred_len:
+                best_loss = None
+                best_alpha = torch.zeros(y_host.shape[:2], device=y_host.device, dtype=y_host.dtype)
+                for alpha in alpha_grid:
+                    mixed = y_host + alpha * delta
+                    horizon_loss = (mixed - y_true).pow(2).mean(dim=2)
+                    if best_loss is None:
+                        best_loss = horizon_loss
+                        best_alpha.fill_(float(alpha))
+                        continue
+                    improved = horizon_loss < best_loss
+                    best_loss = torch.where(improved, horizon_loss, best_loss)
+                    best_alpha = torch.where(improved, alpha.expand_as(best_alpha), best_alpha)
+                return best_alpha.unsqueeze(-1)
+
+            best_loss = None
+            best_alpha = torch.zeros(y_host.shape[0], device=y_host.device, dtype=y_host.dtype)
+            for alpha in alpha_grid:
+                mixed = y_host + alpha * delta
+                loss = (mixed - y_true).pow(2).mean(dim=(1, 2))
+                if best_loss is None:
+                    best_loss = loss
+                    best_alpha.fill_(float(alpha))
+                    continue
+                improved = loss < best_loss
+                best_loss = torch.where(improved, loss, best_loss)
+                best_alpha = torch.where(improved, alpha.expand_as(best_alpha), best_alpha)
+            return best_alpha.view(-1, 1, 1)
 
     def _set_diagnostics(self, diagnostics):
         self.last_diagnostics = {
@@ -525,6 +611,17 @@ class Model(nn.Module):
                 else:
                     gate_target = weighted_alpha.clamp(0.0, self.max_amp).view(-1, 1, 1)
             gate_loss = F.mse_loss(gate, gate_target)
+            teacher_loss = y_host.new_tensor(0.0)
+            weight_loss = y_host.new_tensor(0.0)
+            teacher_mse = y_host.new_tensor(0.0)
+            if self.distill_topk > 0:
+                teacher_y, target_weights = self._oracle_topk_teacher(y_true.detach(), cand_futures.detach())
+                teacher_loss = F.mse_loss(y_ret, teacher_y)
+                weight_loss = self._weight_distill_loss(scores, target_weights)
+                teacher_mse = (teacher_y - y_true.detach()).pow(2).mean()
+                if self.teacher_gate and self.fusion_mode == "residual_amp":
+                    gate_target = self._teacher_gate_target(gate, y_host.detach(), y_true.detach(), teacher_y.detach())
+                    gate_loss = F.mse_loss(gate, gate_target)
             host_loss_for_risk = (y_host.detach() - y_true.detach()).pow(2).mean(dim=(1, 2))
             final_loss_for_risk = (y_final - y_true).pow(2).mean(dim=(1, 2))
             risk_loss = F.relu(final_loss_for_risk - host_loss_for_risk + self.risk_margin).mean()
@@ -544,6 +641,9 @@ class Model(nn.Module):
                     "weighted_alpha": weighted_alpha.mean(),
                     "gate_target": gate_target.mean(),
                     "gate_loss": gate_loss,
+                    "teacher_loss": teacher_loss,
+                    "weight_loss": weight_loss,
+                    "teacher_mse": teacher_mse,
                     "risk_loss": risk_loss,
                     "score_std": scores.detach().std(dim=1, unbiased=False).mean(),
                     "utility_gap": (score_utility.max(dim=1).values - score_utility.min(dim=1).values).mean(),
@@ -562,6 +662,8 @@ class Model(nn.Module):
                 + self.lambda_sparse * sparse_loss
                 + (self.lambda_amp if self.fusion_mode == "residual_amp" else self.lambda_gate) * gate_loss
                 + self.lambda_risk * risk_loss
+                + self.lambda_teacher * teacher_loss
+                + self.lambda_weight * weight_loss
             )
             diagnostics.update(
                 {
@@ -575,6 +677,8 @@ class Model(nn.Module):
                     "lambda_gate": y_host.new_tensor(self.lambda_gate),
                     "lambda_amp": y_host.new_tensor(self.lambda_amp),
                     "lambda_risk": y_host.new_tensor(self.lambda_risk),
+                    "lambda_teacher": y_host.new_tensor(self.lambda_teacher),
+                    "lambda_weight": y_host.new_tensor(self.lambda_weight),
                 }
             )
 
