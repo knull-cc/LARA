@@ -68,6 +68,7 @@ class Model(nn.Module):
         self.gate_target_mode = getattr(configs, "lara_gate_target", "alpha")
         self.offset_align = bool(getattr(configs, "lara_offset_align", True))
         self.fusion_mode = getattr(configs, "lara_fusion", "gate")
+        self.candidate_source = getattr(configs, "lara_candidate_source", "future")
         self.max_amp = float(getattr(configs, "lara_max_amp", 1.0))
         self.alpha_max = float(getattr(configs, "lara_alpha_max", 1.0))
         self.lambda_amp = float(getattr(configs, "lara_lambda_amp", 0.0))
@@ -135,6 +136,8 @@ class Model(nn.Module):
             key_mode=getattr(self.configs, "lara_key_mode", "auto"),
             max_key_dim=int(getattr(self.configs, "lara_max_key_dim", 8192)),
         )
+        if self.candidate_source == "residual":
+            self._prepare_residual_memory(device=device)
         self.retriever = CandidateRetriever(
             self.memory,
             top_m=self.top_m,
@@ -154,8 +157,31 @@ class Model(nn.Module):
             "[LARA] train-only memory prepared: "
             f"N={self.memory.size}, seq_len={self.memory.seq_len}, "
             f"pred_len={self.memory.pred_len}, channels={self.memory.channels}, "
-            f"key_mode={self.memory.key_mode}, top_m={self.top_m}"
+            f"key_mode={self.memory.key_mode}, top_m={self.top_m}, "
+            f"candidate_source={self.candidate_source}"
         )
+
+    def _prepare_residual_memory(self, device=None):
+        if self.memory is None:
+            return
+        device = device or next(self.parameters()).device
+        batch_size = int(getattr(self.configs, "lara_residual_batch_size", 256))
+        batch_size = max(batch_size, 1)
+        was_training = self.host.training
+        self.host.eval()
+        preds = []
+        with torch.no_grad():
+            for start in range(0, self.memory.size, batch_size):
+                end = min(start + batch_size, self.memory.size)
+                past = self.memory.pasts[start:end].to(device)
+                pred = self.host(past, None, None, None)
+                preds.append(pred[:, -self.pred_len:, :].detach().cpu())
+        if was_training and not self.freeze_host:
+            self.host.train()
+        host_pred = torch.cat(preds, dim=0)
+        self.memory.residuals = self.memory.futures - host_pred
+        residual_mse = self.memory.residuals.pow(2).mean().sqrt().item()
+        print(f"[LARA] residual memory prepared: rmse={residual_mse:.6f}")
 
     def _host_forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec, sample_index=None):
         def call_host():
@@ -525,7 +551,11 @@ class Model(nn.Module):
         )
         cand_pasts = retrieval["pasts"].to(y_host.device)
         cand_futures = retrieval["futures"].to(y_host.device)
-        cand_futures = self._align_candidate_futures(x_enc, cand_pasts, cand_futures)
+        if self.candidate_source == "residual" and retrieval.get("residuals", None) is not None:
+            cand_residuals = retrieval["residuals"].to(y_host.device)
+            cand_futures = y_host.detach().unsqueeze(1) + cand_residuals
+        else:
+            cand_futures = self._align_candidate_futures(x_enc, cand_pasts, cand_futures)
         candidate_features = retrieval["features"].to(y_host.device)
         if self.score_mode == "horizon":
             score_features = self._build_horizon_score_features(candidate_features, cand_futures, y_host)
@@ -570,6 +600,7 @@ class Model(nn.Module):
             "pibr_bonus": retrieval.get("pibr_bonus", y_host.new_zeros(y_host.shape[0], self.top_m)).float().mean(),
             "union_extra_m": retrieval.get("union_extra_m", y_host.new_zeros(y_host.shape[0])).float().mean(),
             "residual_amp": y_host.new_tensor(1.0 if self.fusion_mode == "residual_amp" else 0.0),
+            "residual_memory": y_host.new_tensor(1.0 if self.candidate_source == "residual" else 0.0),
             "max_amp": y_host.new_tensor(self.max_amp),
         }
 

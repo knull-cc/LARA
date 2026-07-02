@@ -42,9 +42,10 @@ def build_keys(pasts, key_mode):
 class TimeSeriesMemory:
     """Train-only memory bank used by the LARA MVP retriever."""
 
-    def __init__(self, pasts, futures, marks, indices, key_mode):
+    def __init__(self, pasts, futures, marks, indices, key_mode, residuals=None):
         self.pasts = pasts
         self.futures = futures
+        self.residuals = residuals
         self.marks = marks
         self.indices = indices
         self.key_mode = key_mode

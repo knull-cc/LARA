@@ -194,6 +194,9 @@ class CandidateRetriever:
 
         cand_futures = self.memory.futures[indices.cpu()].to(device)
         cand_pasts = self.memory.pasts[indices.cpu()].to(device)
+        cand_residuals = None
+        if getattr(self.memory, "residuals", None) is not None:
+            cand_residuals = self.memory.residuals[indices.cpu()].to(device)
         pibr_bonus = self._pibr_bonus(query, cand_pasts)
 
         if use_phase_rerank:
@@ -221,6 +224,8 @@ class CandidateRetriever:
             gather_idx = select_pos[:, :, None, None].expand(-1, -1, cand_futures.shape[2], cand_futures.shape[3])
             cand_futures = cand_futures.gather(1, gather_idx)
             cand_pasts = cand_pasts.gather(1, gather_idx)
+            if cand_residuals is not None:
+                cand_residuals = cand_residuals.gather(1, gather_idx)
 
         k = values.shape[1]
 
@@ -257,5 +262,6 @@ class CandidateRetriever:
             "union_extra_m": torch.full((query.shape[0],), float(max(values.shape[1] - self.top_m, 0)), device=device),
             "pasts": cand_pasts,
             "futures": cand_futures,
+            "residuals": cand_residuals,
             "features": features,
         }

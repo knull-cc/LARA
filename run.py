@@ -114,6 +114,10 @@ def build_parser():
                         help='number of extra phase/PIBR candidates appended when lara_retrieval_mode=union')
     parser.add_argument('--lara_fusion', type=str, default='gate', choices=['gate', 'residual_amp'],
                         help='gate uses convex host/retrieval fusion; residual_amp predicts an amplified retrieval residual')
+    parser.add_argument('--lara_candidate_source', type=str, default='future', choices=['future', 'residual'],
+                        help='future uses aligned retrieved futures; residual uses train host residuals as retrieved corrections')
+    parser.add_argument('--lara_residual_batch_size', type=int, default=256,
+                        help='batch size for precomputing train host residual memory')
     parser.add_argument('--lara_max_amp', type=float, default=1.0,
                         help='maximum residual amplification strength when lara_fusion=residual_amp')
     parser.add_argument('--lara_alpha_max', type=float, default=1.0,
