@@ -67,6 +67,12 @@ class Model(nn.Module):
         self.score_mode = getattr(configs, "lara_score_mode", "global")
         self.gate_target_mode = getattr(configs, "lara_gate_target", "alpha")
         self.offset_align = bool(getattr(configs, "lara_offset_align", True))
+        self.fusion_mode = getattr(configs, "lara_fusion", "gate")
+        self.max_amp = float(getattr(configs, "lara_max_amp", 1.0))
+        self.alpha_max = float(getattr(configs, "lara_alpha_max", 1.0))
+        self.lambda_amp = float(getattr(configs, "lara_lambda_amp", 0.0))
+        self.lambda_risk = float(getattr(configs, "lara_lambda_risk", 0.0))
+        self.risk_margin = float(getattr(configs, "lara_risk_margin", 0.0))
 
         self.labeler = UtilityLabeler(alpha_step=float(getattr(configs, "lara_alpha_step", 0.1)))
         if self.score_mode == "horizon":
@@ -134,6 +140,8 @@ class Model(nn.Module):
             pibr_weight=float(getattr(self.configs, "lara_pibr_weight", 0.0)),
             pibr_delta_weight=float(getattr(self.configs, "lara_pibr_delta_weight", 0.5)),
             phase_rerank_mode=getattr(self.configs, "lara_phase_rerank_mode", "add"),
+            retrieval_mode=getattr(self.configs, "lara_retrieval_mode", "replace"),
+            extra_m=int(getattr(self.configs, "lara_extra_m", 0)),
         )
         self.memory_prepared = True
         print(
@@ -223,6 +231,54 @@ class Model(nn.Module):
         host_loss = (y_host.detach() - y_true.detach()).pow(2).mean(dim=2)
         cand_loss = (cand_futures.detach() - y_true.detach().unsqueeze(1)).pow(2).mean(dim=3)
         return host_loss.unsqueeze(1) - cand_loss
+
+    def _residual_utility_labels(self, y_host, y_true, cand_futures):
+        with torch.no_grad():
+            host = y_host.detach()
+            true = y_true.detach()
+            cand = cand_futures.detach()
+            delta = cand - host.unsqueeze(1)
+            host_horizon_loss = (host - true).pow(2).mean(dim=2)
+            host_loss = host_horizon_loss.mean(dim=1, keepdim=True)
+
+            max_alpha = max(self.alpha_max, 0.0)
+            step = float(getattr(self.configs, "lara_alpha_step", 0.1))
+            if step <= 0:
+                step = 0.1
+            alpha_grid = torch.arange(0.0, max_alpha + 1e-6, step, device=host.device, dtype=host.dtype)
+            if alpha_grid.numel() == 0 or float(alpha_grid[-1]) < max_alpha:
+                alpha_grid = torch.cat([alpha_grid, host.new_tensor([max_alpha])])
+
+            best_loss = None
+            best_horizon_loss = None
+            best_alpha = torch.zeros(cand.shape[:2], device=host.device, dtype=host.dtype)
+            best_horizon_alpha = torch.zeros(cand.shape[:2] + (host.shape[1],), device=host.device, dtype=host.dtype)
+            for alpha in alpha_grid:
+                mixed = host.unsqueeze(1) + alpha * delta
+                horizon_loss = (mixed - true.unsqueeze(1)).pow(2).mean(dim=3)
+                loss = horizon_loss.mean(dim=2)
+                if best_loss is None:
+                    best_loss = loss
+                    best_horizon_loss = horizon_loss
+                    best_alpha.fill_(float(alpha))
+                    best_horizon_alpha.fill_(float(alpha))
+                    continue
+
+                improved = loss < best_loss
+                best_loss = torch.where(improved, loss, best_loss)
+                best_alpha = torch.where(improved, alpha.expand_as(best_alpha), best_alpha)
+
+                horizon_improved = horizon_loss < best_horizon_loss
+                best_horizon_loss = torch.where(horizon_improved, horizon_loss, best_horizon_loss)
+                best_horizon_alpha = torch.where(
+                    horizon_improved,
+                    alpha.expand_as(best_horizon_alpha),
+                    best_horizon_alpha,
+                )
+
+            utility = host_loss - best_loss
+            horizon_utility = host_horizon_loss.unsqueeze(1) - best_horizon_loss
+            return utility, best_alpha, horizon_utility, best_horizon_alpha
 
     def _set_diagnostics(self, diagnostics):
         self.last_diagnostics = {
@@ -397,9 +453,22 @@ class Model(nn.Module):
             mode=self.sparse_mode,
         )
 
-        gate_stats = self._build_gate_stats(scores, weights, y_host, y_ret)
-        gate = self.gate(gate_stats)
-        y_final = (1.0 - gate) * y_host + gate * y_ret
+        if self.fusion_mode == "residual_amp":
+            cand_delta = cand_futures - y_host.unsqueeze(1)
+            delta_ret, weights = aggregate_candidates(
+                scores,
+                cand_delta,
+                temperature=self.temperature,
+                mode=self.sparse_mode,
+            )
+            y_ret = y_host + delta_ret
+            gate_stats = self._build_gate_stats(scores, weights, y_host, y_ret)
+            gate = self.gate(gate_stats) * self.max_amp
+            y_final = y_host + gate * delta_ret
+        else:
+            gate_stats = self._build_gate_stats(scores, weights, y_host, y_ret)
+            gate = self.gate(gate_stats)
+            y_final = (1.0 - gate) * y_host + gate * y_ret
         if y_true is not None and mode == "test":
             self._accumulate_oracle_diagnostics(y_host.detach(), y_ret.detach(), y_final.detach(), y_true.detach(), cand_futures.detach())
 
@@ -413,11 +482,24 @@ class Model(nn.Module):
             "phase_pool_k": retrieval.get("phase_pool_k", y_host.new_full((y_host.shape[0],), float(self.top_m))).float().mean(),
             "phase_bonus": retrieval.get("phase_bonus", y_host.new_zeros(y_host.shape[0], self.top_m)).float().mean(),
             "pibr_bonus": retrieval.get("pibr_bonus", y_host.new_zeros(y_host.shape[0], self.top_m)).float().mean(),
+            "union_extra_m": retrieval.get("union_extra_m", y_host.new_zeros(y_host.shape[0])).float().mean(),
+            "residual_amp": y_host.new_tensor(1.0 if self.fusion_mode == "residual_amp" else 0.0),
+            "max_amp": y_host.new_tensor(self.max_amp),
         }
 
         if y_true is not None:
-            utility, alpha_star = self.labeler(y_host, y_true, cand_futures)
-            score_utility = self._horizon_utility_labels(y_host, y_true, cand_futures) if scores.dim() == 3 else utility
+            if self.fusion_mode == "residual_amp":
+                utility, alpha_star, horizon_utility, horizon_alpha = self._residual_utility_labels(
+                    y_host,
+                    y_true,
+                    cand_futures,
+                )
+                score_utility = horizon_utility if scores.dim() == 3 else utility
+            else:
+                utility, alpha_star = self.labeler(y_host, y_true, cand_futures)
+                horizon_utility = self._horizon_utility_labels(y_host, y_true, cand_futures)
+                horizon_alpha = alpha_star.unsqueeze(-1).expand(-1, -1, self.pred_len)
+                score_utility = horizon_utility if scores.dim() == 3 else utility
             oracle_mse_per_query = (
                 (y_host.detach().unsqueeze(1) * (1.0 - alpha_star[:, :, None, None])
                  + cand_futures.detach() * alpha_star[:, :, None, None]
@@ -433,11 +515,19 @@ class Model(nn.Module):
             best_idx = score_summary.argmax(dim=1)
             top_alpha = alpha_star.gather(1, best_idx[:, None]).squeeze(1)
             if weights.dim() == 3:
-                weighted_alpha = (weights.detach() * alpha_star.unsqueeze(-1)).sum(dim=1)
+                weighted_alpha = (weights.detach() * horizon_alpha).sum(dim=1)
             else:
                 weighted_alpha = (weights.detach() * alpha_star).sum(dim=1)
             gate_target = self._build_gate_target(gate, y_host, y_ret, y_true, weighted_alpha)
+            if self.fusion_mode == "residual_amp":
+                if weighted_alpha.dim() == 2:
+                    gate_target = weighted_alpha.clamp(0.0, self.max_amp).unsqueeze(-1)
+                else:
+                    gate_target = weighted_alpha.clamp(0.0, self.max_amp).view(-1, 1, 1)
             gate_loss = F.mse_loss(gate, gate_target)
+            host_loss_for_risk = (y_host.detach() - y_true.detach()).pow(2).mean(dim=(1, 2))
+            final_loss_for_risk = (y_final - y_true).pow(2).mean(dim=(1, 2))
+            risk_loss = F.relu(final_loss_for_risk - host_loss_for_risk + self.risk_margin).mean()
 
             diagnostics.update(
                 {
@@ -454,6 +544,7 @@ class Model(nn.Module):
                     "weighted_alpha": weighted_alpha.mean(),
                     "gate_target": gate_target.mean(),
                     "gate_loss": gate_loss,
+                    "risk_loss": risk_loss,
                     "score_std": scores.detach().std(dim=1, unbiased=False).mean(),
                     "utility_gap": (score_utility.max(dim=1).values - score_utility.min(dim=1).values).mean(),
                 }
@@ -469,7 +560,8 @@ class Model(nn.Module):
                 + self.lambda_pair * pair_loss
                 + self.lambda_score * score_loss
                 + self.lambda_sparse * sparse_loss
-                + self.lambda_gate * gate_loss
+                + (self.lambda_amp if self.fusion_mode == "residual_amp" else self.lambda_gate) * gate_loss
+                + self.lambda_risk * risk_loss
             )
             diagnostics.update(
                 {
@@ -481,6 +573,8 @@ class Model(nn.Module):
                     "lambda_pair": y_host.new_tensor(self.lambda_pair),
                     "lambda_score": y_host.new_tensor(self.lambda_score),
                     "lambda_gate": y_host.new_tensor(self.lambda_gate),
+                    "lambda_amp": y_host.new_tensor(self.lambda_amp),
+                    "lambda_risk": y_host.new_tensor(self.lambda_risk),
                 }
             )
 

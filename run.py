@@ -108,6 +108,22 @@ def build_parser():
                         help='weight for cycle-to-cycle delta consistency inside the PIBR bonus')
     parser.add_argument('--lara_phase_rerank_mode', type=str, default='add', choices=['add', 'phase', 'pibr'],
                         help='phase rerank mode: add combines similarity/phase/PIBR; phase or pibr uses only that prior within the coarse pool')
+    parser.add_argument('--lara_retrieval_mode', type=str, default='replace', choices=['replace', 'union'],
+                        help='replace reranks top-M from the coarse pool; union keeps shape top-M and appends extra prior-ranked candidates')
+    parser.add_argument('--lara_extra_m', type=int, default=0,
+                        help='number of extra phase/PIBR candidates appended when lara_retrieval_mode=union')
+    parser.add_argument('--lara_fusion', type=str, default='gate', choices=['gate', 'residual_amp'],
+                        help='gate uses convex host/retrieval fusion; residual_amp predicts an amplified retrieval residual')
+    parser.add_argument('--lara_max_amp', type=float, default=1.0,
+                        help='maximum residual amplification strength when lara_fusion=residual_amp')
+    parser.add_argument('--lara_alpha_max', type=float, default=1.0,
+                        help='maximum oracle alpha used for residual amplification supervision')
+    parser.add_argument('--lara_lambda_amp', type=float, default=0.0,
+                        help='supervised amplification target loss weight')
+    parser.add_argument('--lara_lambda_risk', type=float, default=0.0,
+                        help='risk loss weight penalizing final forecasts worse than host')
+    parser.add_argument('--lara_risk_margin', type=float, default=0.0,
+                        help='allowed final-vs-host loss margin before risk penalty')
     parser.add_argument('--lara_temperature', type=float, default=0.1, help='LARA retrieval aggregation temperature')
     parser.add_argument('--lara_rank_temperature', type=float, default=0.1, help='LARA utility ranking temperature')
     parser.add_argument('--lara_lambda_rank', type=float, default=0.3, help='LARA rank loss weight')

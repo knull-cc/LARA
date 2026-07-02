@@ -16,6 +16,8 @@ class CandidateRetriever:
         pibr_weight=0.0,
         pibr_delta_weight=0.5,
         phase_rerank_mode="add",
+        retrieval_mode="replace",
+        extra_m=0,
     ):
         self.memory = memory
         self.top_m = top_m
@@ -27,6 +29,8 @@ class CandidateRetriever:
         self.pibr_weight = float(pibr_weight)
         self.pibr_delta_weight = float(pibr_delta_weight)
         self.phase_rerank_mode = phase_rerank_mode
+        self.retrieval_mode = retrieval_mode
+        self.extra_m = int(extra_m)
 
     def _similarity(self, query):
         q_keys = self.memory.query_keys(query).to(query.device)
@@ -129,6 +133,50 @@ class CandidateRetriever:
             select_pos,
         )
 
+    def _union_select(self, values, indices, phase_bonus, pibr_bonus, rerank_score):
+        shape_k = min(self.top_m, values.shape[1])
+        extra_k = max(self.extra_m, 0)
+        final_k = min(shape_k + extra_k, values.shape[1])
+        if extra_k == 0 or final_k == shape_k:
+            select_pos = torch.arange(shape_k, device=values.device).unsqueeze(0).expand(values.shape[0], -1)
+            return (
+                values[:, :shape_k],
+                indices[:, :shape_k],
+                phase_bonus[:, :shape_k],
+                pibr_bonus[:, :shape_k],
+                select_pos,
+            )
+
+        rerank_order = torch.argsort(rerank_score, dim=1, descending=True)
+        selected_rows = []
+        base_positions = torch.arange(shape_k, device=values.device)
+        for batch_idx in range(values.shape[0]):
+            selected = base_positions.tolist()
+            selected_ids = set(indices[batch_idx, :shape_k].detach().cpu().tolist())
+            for pos in rerank_order[batch_idx].detach().cpu().tolist():
+                cand_id = int(indices[batch_idx, pos].detach().cpu())
+                if cand_id in selected_ids:
+                    continue
+                selected.append(int(pos))
+                selected_ids.add(cand_id)
+                if len(selected) >= final_k:
+                    break
+            if len(selected) < final_k:
+                for pos in range(values.shape[1]):
+                    if pos not in selected:
+                        selected.append(pos)
+                    if len(selected) >= final_k:
+                        break
+            selected_rows.append(torch.tensor(selected[:final_k], device=values.device, dtype=torch.long))
+        select_pos = torch.stack(selected_rows, dim=0)
+        return (
+            values.gather(1, select_pos),
+            indices.gather(1, select_pos),
+            phase_bonus.gather(1, select_pos),
+            pibr_bonus.gather(1, select_pos),
+            select_pos,
+        )
+
     def retrieve(self, query, query_mark=None, sample_index=None, train=False):
         sim = self._similarity(query)
         if train:
@@ -149,12 +197,27 @@ class CandidateRetriever:
         pibr_bonus = self._pibr_bonus(query, cand_pasts)
 
         if use_phase_rerank:
-            values, indices, phase_bonus, pibr_bonus, select_pos = self._phase_rerank(
-                values,
-                indices,
-                phase_bonus,
-                pibr_bonus,
-            )
+            rerank_score = values + self.phase_weight * phase_bonus + self.pibr_weight * pibr_bonus
+            if self.phase_rerank_mode == "phase":
+                rerank_score = phase_bonus
+            elif self.phase_rerank_mode == "pibr":
+                rerank_score = pibr_bonus
+
+            if self.retrieval_mode == "union":
+                values, indices, phase_bonus, pibr_bonus, select_pos = self._union_select(
+                    values,
+                    indices,
+                    phase_bonus,
+                    pibr_bonus,
+                    rerank_score,
+                )
+            else:
+                values, indices, phase_bonus, pibr_bonus, select_pos = self._phase_rerank(
+                    values,
+                    indices,
+                    phase_bonus,
+                    pibr_bonus,
+                )
             gather_idx = select_pos[:, :, None, None].expand(-1, -1, cand_futures.shape[2], cand_futures.shape[3])
             cand_futures = cand_futures.gather(1, gather_idx)
             cand_pasts = cand_pasts.gather(1, gather_idx)
@@ -191,6 +254,7 @@ class CandidateRetriever:
             "pibr_bonus": pibr_bonus,
             "phase_rerank": torch.full((query.shape[0],), 1.0 if use_phase_rerank else 0.0, device=device),
             "phase_pool_k": torch.full((query.shape[0],), float(pool_k), device=device),
+            "union_extra_m": torch.full((query.shape[0],), float(max(values.shape[1] - self.top_m, 0)), device=device),
             "pasts": cand_pasts,
             "futures": cand_futures,
             "features": features,
