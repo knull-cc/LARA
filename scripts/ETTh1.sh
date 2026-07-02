@@ -1,9 +1,31 @@
 #!/usr/bin/env bash
-# ETTh1 (7 variates, hourly). One-click residual-amplified LARA_DLinear run.
+# ETTh1 (7 variates, hourly). One-click two-stage LARA_DLinear run.
 extra_args="$@"
 
 seq_len=96
 for pred_len in 96; do
+  host_model_id=ETTh1_DLinear_host_${seq_len}_${pred_len}
+  host_des=DLinear_host_ETTh1_96_ep10
+  host_setting=long_term_forecast_${host_model_id}_DLinear_ETTh1_ftM_sl${seq_len}_ll48_pl${pred_len}_dm512_nh8_el2_dl1_df512_fc3_ebtimeF_${host_des}_0
+  host_ckpt=./checkpoints/${host_setting}/checkpoint.pth
+
+  if [ ! -f "$host_ckpt" ]; then
+    python -u run.py \
+      --task_name long_term_forecast --is_training 1 \
+      --data ETTh1 --root_path ./dataset/ETT-small/ --data_path ETTh1.csv --freq h \
+      --model_id $host_model_id --model DLinear \
+      --features M --seq_len $seq_len --label_len 48 --pred_len $pred_len \
+      --enc_in 7 --dec_in 7 --c_out 7 \
+      --e_layers 2 --d_layers 1 --factor 3 --d_model 512 --d_ff 512 \
+      --des $host_des --itr 1 --batch_size 32 --learning_rate 0.0003 \
+      --train_epochs 10 --patience 3 --num_workers 0
+  fi
+
+  if [ ! -f "$host_ckpt" ]; then
+    echo "Missing host checkpoint: $host_ckpt"
+    exit 1
+  fi
+
   python -u run.py \
     --task_name long_term_forecast --is_training 1 \
     --data ETTh1 --root_path ./dataset/ETT-small/ --data_path ETTh1.csv --freq h \
@@ -20,6 +42,7 @@ for pred_len in 96; do
     --lara_sparse_mode sparsemax --lara_score_mode horizon \
     --lara_fusion residual_amp --lara_max_amp 2.0 --lara_alpha_max 2.0 --lara_alpha_step 0.25 \
     --lara_lambda_amp 1.0 --lara_lambda_risk 1.0 --lara_risk_margin 0.0 \
+    --lara_host_ckpt "$host_ckpt" --lara_freeze_host \
     --lara_oracle_ms 1,3,5,10,20,50 --lara_oracle_topk 1,3,5 \
     $extra_args
 done
