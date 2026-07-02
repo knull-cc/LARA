@@ -70,10 +70,10 @@ class Model(nn.Module):
 
         self.labeler = UtilityLabeler(alpha_step=float(getattr(configs, "lara_alpha_step", 0.1)))
         if self.score_mode == "horizon":
-            self.reranker = HorizonUtilityReranker(feature_dim=13)
+            self.reranker = HorizonUtilityReranker(feature_dim=15)
             self.gate = FusionGate(self.pred_len, gate_type="horizon", stat_dim=7, per_horizon=True)
         else:
-            self.reranker = UtilityReranker(feature_dim=6)
+            self.reranker = UtilityReranker(feature_dim=8)
             self.gate = FusionGate(self.pred_len, gate_type=getattr(configs, "lara_gate", "scalar"))
 
         self.memory = None
@@ -128,6 +128,12 @@ class Model(nn.Module):
             top_m=self.top_m,
             chunk_size=int(getattr(self.configs, "lara_retrieval_chunk", 4096)),
             overlap_margin=int(getattr(self.configs, "lara_overlap_margin", 0)),
+            phase_top_k=int(getattr(self.configs, "lara_phase_top_k", 0)),
+            phase_weight=float(getattr(self.configs, "lara_phase_weight", 0.2)),
+            pibr_period=int(getattr(self.configs, "lara_pibr_period", 24)),
+            pibr_weight=float(getattr(self.configs, "lara_pibr_weight", 0.0)),
+            pibr_delta_weight=float(getattr(self.configs, "lara_pibr_delta_weight", 0.5)),
+            phase_rerank_mode=getattr(self.configs, "lara_phase_rerank_mode", "add"),
         )
         self.memory_prepared = True
         print(
@@ -403,6 +409,10 @@ class Model(nn.Module):
             "weight_entropy": normalized_entropy(weights),
             "offset_align": y_host.new_tensor(1.0 if self.offset_align else 0.0),
             "horizon_scorer": y_host.new_tensor(1.0 if self.score_mode == "horizon" else 0.0),
+            "phase_rerank": retrieval.get("phase_rerank", y_host.new_zeros(y_host.shape[0])).float().mean(),
+            "phase_pool_k": retrieval.get("phase_pool_k", y_host.new_full((y_host.shape[0],), float(self.top_m))).float().mean(),
+            "phase_bonus": retrieval.get("phase_bonus", y_host.new_zeros(y_host.shape[0], self.top_m)).float().mean(),
+            "pibr_bonus": retrieval.get("pibr_bonus", y_host.new_zeros(y_host.shape[0], self.top_m)).float().mean(),
         }
 
         if y_true is not None:

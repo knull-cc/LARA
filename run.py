@@ -96,6 +96,18 @@ def build_parser():
     # LARA MVP adapter
     parser.add_argument('--lara_top_m', type=int, default=32, help='LARA top-M retrieval candidates')
     parser.add_argument('--lara_retrieval_chunk', type=int, default=4096, help='LARA memory search chunk size')
+    parser.add_argument('--lara_phase_top_k', type=int, default=0,
+                        help='coarse shape-similarity pool size before phase-aware reranking; 0 disables reranking')
+    parser.add_argument('--lara_phase_weight', type=float, default=0.2,
+                        help='phase bonus weight when lara_phase_rerank_mode=add')
+    parser.add_argument('--lara_pibr_period', type=int, default=24,
+                        help='PIBR local period length used for phase-consistent candidate reranking')
+    parser.add_argument('--lara_pibr_weight', type=float, default=0.0,
+                        help='PIBR periodic-state bonus weight when lara_phase_rerank_mode=add')
+    parser.add_argument('--lara_pibr_delta_weight', type=float, default=0.5,
+                        help='weight for cycle-to-cycle delta consistency inside the PIBR bonus')
+    parser.add_argument('--lara_phase_rerank_mode', type=str, default='add', choices=['add', 'phase', 'pibr'],
+                        help='phase rerank mode: add combines similarity/phase/PIBR; phase or pibr uses only that prior within the coarse pool')
     parser.add_argument('--lara_temperature', type=float, default=0.1, help='LARA retrieval aggregation temperature')
     parser.add_argument('--lara_rank_temperature', type=float, default=0.1, help='LARA utility ranking temperature')
     parser.add_argument('--lara_lambda_rank', type=float, default=0.3, help='LARA rank loss weight')
