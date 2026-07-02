@@ -606,10 +606,11 @@ class Model(nn.Module):
                 weighted_alpha = (weights.detach() * alpha_star).sum(dim=1)
             gate_target = self._build_gate_target(gate, y_host, y_ret, y_true, weighted_alpha)
             if self.fusion_mode == "residual_amp":
-                if weighted_alpha.dim() == 2:
-                    gate_target = weighted_alpha.clamp(0.0, self.max_amp).unsqueeze(-1)
-                else:
-                    gate_target = weighted_alpha.clamp(0.0, self.max_amp).view(-1, 1, 1)
+                if self.gate_target_mode != "oracle":
+                    if weighted_alpha.dim() == 2:
+                        gate_target = weighted_alpha.clamp(0.0, self.max_amp).unsqueeze(-1)
+                    else:
+                        gate_target = weighted_alpha.clamp(0.0, self.max_amp).view(-1, 1, 1)
             gate_loss = F.mse_loss(gate, gate_target)
             teacher_loss = y_host.new_tensor(0.0)
             weight_loss = y_host.new_tensor(0.0)
